@@ -1,0 +1,237 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ranger Studio Agent Definition",
+  "description": "Visual agent definition schema for Ranger Studio",
+  "type": "object",
+  "required": ["metadata", "state", "capabilities", "goal"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "description": "Agent identifier (lowercase, hyphens)"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Semantic version"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description"
+        },
+        "author": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "description": "State space definition",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["text", "json", "number", "boolean", "binary"]
+          },
+          "initial": {
+            "type": "boolean",
+            "description": "Required in initial state",
+            "default": false
+          },
+          "schema": {
+            "type": "object",
+            "description": "JSON Schema for validation"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "description": "Capability definitions",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "reads", "writes"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]*$",
+            "description": "Capability identifier"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["step", "tool", "llm", "human"],
+            "description": "Capability runner type"
+          },
+          "reads": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "State fields this capability reads"
+          },
+          "writes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "State fields this capability writes"
+          },
+          "implementation": {
+            "type": "object",
+            "description": "Type-specific implementation",
+            "oneOf": [
+              {
+                "properties": {
+                  "language": {
+                    "const": "python"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "system": {
+                    "type": "string"
+                  },
+                  "template": {
+                    "type": "string"
+                  },
+                  "schema": {
+                    "type": "object"
+                  },
+                  "temperature": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "api": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "type": "string"
+                      },
+                      "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "DELETE"]
+                      },
+                      "headers": {
+                        "type": "object"
+                      },
+                      "body_template": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "goal": {
+      "type": "object",
+      "required": ["scope"],
+      "properties": {
+        "scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Required state fields for goal"
+        },
+        "validation": {
+          "type": "string",
+          "description": "Python code for custom validation"
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "regions": {
+      "type": "object",
+      "description": "Topology regions configuration",
+      "properties": {
+        "memory": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["sqlite", "postgres", "redis"]
+            },
+            "config": {
+              "type": "object"
+            }
+          }
+        },
+        "guards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "config": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "description": "Execution budget constraints",
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
+

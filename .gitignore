@@ -13,9 +13,10 @@ __pycache__
 coverage.json
 .coverage
 testwriter_output
-__pycache__
 .DS_Store
 .cursorrules
 .viz_pos.json
 coverage.xml
 logs
+.ranger/
+.testwriter_coverage.json

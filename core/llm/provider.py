@@ -1,14 +1,18 @@
-"""LLM Provider Protocol and implementations.
+"""LLM provider protocol and implementations.
 
 This module defines the pluggable LLM provider interface and provides
-implementations for various LLM providers (OpenAI, Claude, etc.).
-Users can easily swap providers by changing a single parameter.
+implementations backed by remote APIs or topology regions.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Optional, Protocol
+
+import json
 import os
 import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Protocol
+
+from topology.registry import get_region
 
 
 class LLMProvider(Protocol):
@@ -38,6 +42,66 @@ class LLMProvider(Protocol):
             Generated text response
         """
         ...
+
+
+class RegionBackedProvider:
+    """Provider that forwards generation requests to a topology region."""
+
+    def __init__(
+        self,
+        region_key: str,
+        *,
+        budget: Optional[Dict[str, Any]] = None,
+        default_options: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.region_key = region_key
+        self.budget = dict(budget or {})
+        self.default_options = dict(default_options or {})
+
+    def generate(
+        self,
+        *,
+        system: Optional[str] = None,
+        prompt: str,
+        model: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        schema: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        region = get_region(self.region_key)
+        if region is None:
+            raise RuntimeError(f"LLM region '{self.region_key}' not registered")
+
+        options: Dict[str, Any] = dict(self.default_options)
+        if system:
+            options.setdefault("system_prompt", system)
+        if model:
+            options.setdefault("model", model)
+        if temperature is not None:
+            options.setdefault("temperature", temperature)
+        if max_tokens is not None:
+            options.setdefault("max_tokens", max_tokens)
+
+        payload: Dict[str, Any] = {"text": prompt}
+        if schema is not None:
+            payload["schema"] = schema
+        if options:
+            payload["options"] = options
+
+        budget = dict(self.budget)
+        if max_tokens is not None:
+            budget.setdefault("max_tokens", max_tokens)
+
+        atoms = list(region.infer(payload, window=[], budget=budget))
+        if not atoms:
+            raise RuntimeError(f"LLM region '{self.region_key}' returned no atoms")
+
+        content = atoms[0].content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            return json.dumps(content)
+        return json.dumps(content, default=str)
 
 
 class OpenAIProvider:
@@ -138,8 +202,7 @@ class ClaudeProvider:
             api_key: Anthropic API key, uses ANTHROPIC_API_KEY env var if None
         """
         try:
-            import anthropic
-            import os
+            import anthropic  # type: ignore[import]
             
             key = api_key or os.environ.get("ANTHROPIC_API_KEY")
             if not key:
@@ -184,123 +247,89 @@ class ClaudeProvider:
         return content
 
 
-class GroqProvider:
-    """Groq LLM provider implementation.
-    
-    Example implementation for Groq's fast inference API.
-    Requires groq package: pip install groq
-    """
-    
-    def __init__(self, api_key: Optional[str] = None):
-        """Initialize Groq provider.
-        
-        Args:
-            api_key: Groq API key, uses GROQ_API_KEY env var if None
-        """
-        try:
-            from groq import Groq
-            import os
-            
-            key = api_key or os.environ.get("GROQ_API_KEY")
-            if not key:
-                raise ValueError("GROQ_API_KEY environment variable not set")
-            
-            self.client = Groq(api_key=key)
-        except ImportError:
-            raise ImportError("groq package required: pip install groq")
-    
-    def generate(
-        self, 
-        *, 
-        system: Optional[str] = None,
-        prompt: str,
-        model: str = "llama3-8b-8192",
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        schema: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Generate text using Groq API."""
-        print(f"      🤖 Groq: {model}")
-        
-        # Build messages
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        
-        # Groq API call (OpenAI-compatible)
-        response = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature or 0.2,
-            max_tokens=max_tokens or 1500,
+@dataclass
+class LLMProfile:
+    provider: Optional[LLMProvider]
+    region_key: Optional[str]
+    region_budget: Dict[str, Any]
+    region_options: Dict[str, Any]
+    defaults: Dict[str, Any]
+    region_factory: Optional[Callable[[], Any]]
+
+
+_LLM_PROFILES: Dict[str, LLMProfile] = {}
+
+
+def register_llm_profile(
+    name: str,
+    *,
+    provider: Optional[LLMProvider] = None,
+    region_key: Optional[str] = None,
+    region_budget: Optional[Dict[str, Any]] = None,
+    region_options: Optional[Dict[str, Any]] = None,
+    defaults: Optional[Dict[str, Any]] = None,
+    region_factory: Optional[Callable[[], Any]] = None,
+) -> None:
+    if provider is None and region_key is None:
+        raise ValueError("LLM profile requires either a provider or region_key")
+
+    _LLM_PROFILES[name] = LLMProfile(
+        provider=provider,
+        region_key=region_key,
+        region_budget=dict(region_budget or {}),
+        region_options=dict(region_options or {}),
+        defaults=dict(defaults or {}),
+        region_factory=region_factory,
+    )
+
+
+def resolve_llm_profile(name: str) -> tuple[LLMProvider, Dict[str, Any]]:
+    profile = _LLM_PROFILES.get(name)
+    if profile is None:
+        raise KeyError(f"Unknown LLM profile '{name}'")
+
+    provider = profile.provider
+    if profile.region_key:
+        region = get_region(profile.region_key)
+        if region is None and profile.region_factory is not None:
+            profile.region_factory()
+            region = get_region(profile.region_key)
+        if region is None:
+            raise RuntimeError(
+                f"LLM profile '{name}' expects region '{profile.region_key}' to be registered"
+            )
+        provider = RegionBackedProvider(
+            profile.region_key,
+            budget=profile.region_budget,
+            default_options=profile.region_options,
         )
-        
-        content = response.choices[0].message.content or ""
-        
-        # Note: Groq may not support JSON mode for all models
-        if schema:
-            print("      ⚠️  Groq: JSON schema enforcement via prompt instructions")
-        
-        return content
+    if provider is None:
+        raise RuntimeError(f"LLM profile '{name}' has no provider or region")
+
+    return provider, dict(profile.defaults)
 
 
-class LocalLLMProvider:
-    """Local LLM provider implementation.
-    
-    Example implementation for local LLMs via ollama or similar.
-    Requires requests package for HTTP calls.
-    """
-    
-    def __init__(self, base_url: str = "http://localhost:11434"):
-        """Initialize local LLM provider.
-        
-        Args:
-            base_url: Base URL for local LLM API (e.g., ollama)
-        """
-        self.base_url = base_url.rstrip("/")
-    
-    def generate(
-        self, 
-        *, 
-        system: Optional[str] = None,
-        prompt: str,
-        model: str = "llama2",
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        schema: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Generate text using local LLM API."""
-        print(f"      🤖 Local LLM: {model}")
-        
-        try:
-            import requests
-        except ImportError:
-            raise ImportError("requests package required: pip install requests")
-        
-        # Build prompt with system message
-        full_prompt = prompt
-        if system:
-            full_prompt = f"System: {system}\n\nUser: {prompt}"
-        
-        # Call local API (ollama format)
-        payload = {
-            "model": model,
-            "prompt": full_prompt,
-            "stream": False,
-            "options": {
-                "temperature": temperature or 0.2,
-                "num_predict": max_tokens or 1500,
-            }
+def list_llm_profiles() -> Dict[str, Dict[str, Any]]:
+    return {
+        name: {
+            "region_key": profile.region_key,
+            "defaults": dict(profile.defaults),
         }
-        
-        response = requests.post(f"{self.base_url}/api/generate", json=payload)
-        response.raise_for_status()
-        
-        result = response.json()
-        content = result.get("response", "")
-        
-        if schema:
-            print("      ⚠️  Local LLM: JSON schema enforcement via prompt instructions")
-        
-        return content
+        for name, profile in _LLM_PROFILES.items()
+    }
+
+
+def clear_llm_profiles() -> None:
+    _LLM_PROFILES.clear()
+
+
+__all__ = [
+    "LLMProvider",
+    "RegionBackedProvider",
+    "OpenAIProvider",
+    "ClaudeProvider",
+    "register_llm_profile",
+    "resolve_llm_profile",
+    "list_llm_profiles",
+    "clear_llm_profiles",
+]

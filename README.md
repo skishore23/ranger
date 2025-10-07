@@ -13,6 +13,100 @@ This guide shows you how to build production-grade agents with **zero orchestrat
 
 ---
 
+## Quickstart (CLI-first)
+
+Once Ranger is installed (`pip install -e .` during development), the `ranger` CLI helps you get moving quickly:
+
+```bash
+ranger init demo-agent            # scaffold a new agent package + smoke test
+ranger trace ranger.db --domain demo --limit 20  # inspect memory atoms
+ranger scenario ranger.db --domain demo --json   # replay coverage + goal checks
+ranger visualize agents.testwriter.agent:TestWriterAgent --repo . --format svg  # requires `pip install ranger[viz]`
+ranger visualize agents.deep_research.agent:DeepResearchAgent --repo . --format svg  # visualize new research agent
+```
+
+The scaffold mirrors the conventions used by the bundled test-writer agent and configures memory/LLM regions via `boot.py`. Run `ranger --help` to explore all commands. Extended documentation lives under [`docs/`](docs/README.md).
+
+---
+
+### Agent runtime scaffold
+
+`agents.common.AgentRuntime` centralises memory setup, registry resets, and scenario utilities so your facades stay tiny. Supply your capability list and budget once, then call `run_agent(...)` when you need to execute:
+
+```python
+from agents.common import AgentRuntime
+from boot import get_default_budget, setup_openai_llm
+from core.llm.provider import register_llm_profile
+from core.plan import plan, action
+
+
+class MyAgent(AgentRuntime):
+    def __init__(self, **runtime_options):
+        super().__init__(
+            budget=get_default_budget(),
+            memory_key="myagent.memory",
+            memory_domain="myagent",
+            db_filename="myagent.db",
+            **runtime_options,
+        )
+
+    def build_plan(self):
+        register_llm_profile(
+            "myagent.generate",
+            region_key="myagent.llm",
+            defaults={"model": "gpt-4o-mini", "temperature": 0.0},
+            region_factory=lambda: setup_openai_llm(
+                key="myagent.llm",
+                model="gpt-4o-mini",
+                temperature=0.0,
+            ),
+        )
+        stages = [...]
+        return plan(*[action(cap) for cap in stages])
+
+    def run(self, *, max_steps: int = 120):
+        return self.run_agent(
+            initial={"myagent.config": {...}},
+            goal=capabilities.my_goal,
+            max_steps=max_steps,
+        )
+```
+
+Guard regions can be passed via the `guard_regions=` argument, and `scenario_report()` / `scenario_timeline()` come for free.
+
+Pass `visualize=True` (or a custom `Path`) to `run()` when you want the runtime to emit a capability graph automatically.
+
+Forward runtime options like `repo_root=Path("/workspace")` or `auto_visualize=True` when instantiating your agent; the base runtime handles filesystem prep and Graphviz integration on your behalf.
+
+---
+
+### Why the framework is shaped this way
+
+- Declarative I/O keeps capability code easy to audit: every function lists the state keys it touches, so reviewers can reason about side effects without hunting through control flow.
+- Runtime planning replaces hand-written orchestration: the engine diff-checks snapshots, activates just the capabilities that need to run, and parallelises batches safely.
+- State lives in one place: replaying `.ranger/*.db` through `ScenarioHarness` gives deterministic debugging, coverage checks, and regression playback.
+- Facades stay minimal: `AgentRuntime` handles memory registration, guardrails, and visualisation so you focus on domain logic, not boilerplate.
+- Extensibility follows composition: plug additional capabilities into the list or register new regions in `configure_runtime()` without rewriting the core loop.
+
+---
+
+### Plan builder (canonical composition path)
+
+- Use `core.plan.plan` to compose capabilities instead of hand-maintained lists: `test_plan = plan(action(cap1)) >> action(cap2)`.
+- Plans compile directly into agents (`test_plan.compile()`) and integrate with `AgentRuntime` via `build_plan()`.
+- Any inputs not satisfied by upstream outputs are surfaced as dangling requirements so you can seed them with initial state.
+- Plans operate on plain capabilities, so existing decorators (`@step`, `@tool`, etc.) continue to work unchanged.
+- Mark required initial keys per action via `action(cap, requires_initial={"repo.root"})` and call `plan.describe()` or `plan.validate()` to audit missing inputs before runtime.
+- See `docs/API_REFERENCE.md` for a concise API map.
+
+### LLM profiles
+
+- Register shared model settings once: `register_llm_profile("myagent.generate", region_key="myagent.llm", defaults={"model": "gpt-4o-mini"}, region_factory=lambda: setup_openai_llm(...))`.
+- Reference the profile in capabilities with `@llm(profile="myagent.generate", inputs=[...], outputs=[...])`—no more manual runner mutation.
+- Profiles can declare `region_factory` so the required region is auto-registered the first time it’s used, keeping façade code trivial.
+
+---
+
 # 1) Mental model in 90 seconds
 
 * The **State** is a typed key-value map, e.g. `{"repo.ast": ..., "tests.gen": ...}`.
@@ -38,18 +132,28 @@ flowchart TD
 
 ---
 
+### Inputs & outputs in practice
+
+- `inputs=[...]` lists **state keys your capability must read** before it can run. When you specify more than one key (e.g. `inputs=["repo.root", "module.index"]`), the engine waits until *all* of them exist in the snapshot.
+- `outputs=[...]` names every key your capability promises to write. Multiple outputs mean the returned dict must contain each key; leaving one out fails validation.
+- Treat keys as namespaced facts: short dotted paths such as `tests.plan.todo` or `research.summary` keep state readable and avoid collisions.
+- You can emit derived data without mutating inputs—return a new dict with just your outputs. Ranger merges it back into the shared snapshot atomically.
+- Optional data flows stay declarative: produce flags like `{"tests.run": True}` and let downstream steps declare that flag as an input so the planner tees up the right work.
+
+---
+
 # 2) Minimal API you’ll use
 
 ```python
 from core.sdk import step, tool, llm, human, goal, Agent
 ```
 
-* `@step(inputs=[...], outputs=[...])` – pure compute (no side effects).
-* `@tool(inputs=[...], outputs=[...])` – actions (CLI/API/LLM/Human).
-* `@llm(...)` – convenience wrapper around `@tool` for LLM calls (handles prompts/JSON/provider).
-* `@human(...)` – convenience wrapper for non-blocking review/approval.
-* `@goal(scope={...})` – declares which keys matter for completion.
-* `Agent([...]).run(initial=..., goal=..., max_steps=...)` – executes until done or budget.
+- `@step(inputs=[...], outputs=[...])` returns a dict of new state; use it for deterministic transforms, parsing, indexing, and scoring.
+- `@tool(inputs=[...], outputs=[...])` lets you call subprocesses, HTTP APIs, or mutate the filesystem—anything with side effects belongs here.
+- `@llm(...)` wraps `@tool` with prompting helpers, schema validation, retry semantics, and optional provider wiring.
+- `@human(...)` renders a form in the UI so people can approve, edit, or supply gating information without stopping the engine.
+- `@goal(scope=[...])` inspects state after every batch; return `True` when you are done or raise `GoalBlocked(...)` with machine-readable details.
+- `Agent(capabilities).run(...)` drives execution; in practice you call `AgentRuntime.run_agent(...)` so memory, budgets, and reports are uniform.
 
 > **Aliases:** `uses/updates` are accepted everywhere as synonyms for `inputs/outputs`.
 
@@ -182,7 +286,7 @@ def build_ast(st):
 @llm(
   inputs=["repo.ast"], outputs=["tests.gen"],
   system="You are a senior Python test engineer. Return JSON {files:[{path,content}]}",
-  template="agents/testwriter/prompts/gen_tests.jinja",
+  template="path/to/gen_tests_prompt.jinja",
   schema={"type":"object","properties":{"files":{"type":"array"}},"required":["files"]},
   provider=my_llm_provider,
 )
@@ -225,7 +329,7 @@ def run_pytest(st):
 @llm(
   inputs=["run.result","tests.gen"], outputs=["tests.gen"],
   system="Repair failing pytest tests. Return JSON {files:[{path,content}]}",
-  template="agents/testwriter/prompts/repair_tests.jinja",
+  template="path/to/repair_tests_prompt.jinja",
   schema={"type":"object","properties":{"files":{"type":"array"}},"required":["files"]},
   provider=my_llm_provider,
 )
@@ -255,6 +359,31 @@ graph LR
 ```
 
 **Why it loops by itself:** if `run_pytest` fails, `repair` becomes ready (it **inputs** `run.result`), updates `tests.gen`, which makes `write_to_disk` and then `run_pytest` ready again—until tests pass.
+
+---
+
+### Deep Research Agent (Firecrawl + citations)
+
+The `agents/deep_research` package applies the same topology patterns to autonomous, citation-rich research. Highlights:
+
+- `capture_request` normalizes the topic + configuration into a durable request artifact.
+- `design_research_plan` and `synthesize_notes` lean on the LLM region (with offline fallbacks) to craft outlines and structured findings.
+- `gather_sources` integrates with Firecrawl (or synthetic stand-ins) to fetch web intelligence, persisting atoms for replay.
+- `draft_report` assembles a multi-section, 15+ page briefing with guaranteed citation density; `ensure_feedback` / `human_review` keep a human-in-the-loop hook available.
+- `finalize_report`, `persist_report`, and `summarize_execution` deliver the final document, metrics, and provenance.
+
+Run it offline or with real API keys:
+
+```bash
+export FIRECRAWL_KEY=sk-...
+python -m agents.deep_research.agent --topic "Long-term outlook for quantum sensing"
+```
+
+Visualize the capability graph after installing the `viz` extra:
+
+```bash
+ranger visualize agents.deep_research.agent:DeepResearchAgent --repo . --format svg
+```
 
 ---
 
@@ -381,7 +510,6 @@ ranger/
 │   ├── validate.py                 # Value validation and type checking
 │   ├── hints.py                    # Type hints and validation helpers
 │   ├── provenance.py               # Execution provenance tracking
-│   ├── decorators.py               # Legacy decorators (capability, goal)
 │   ├── llm/                        # Language model integration
 │   │   ├── __init__.py
 │   │   └── provider.py             # LLM provider protocol and implementations
@@ -396,15 +524,10 @@ ranger/
 ├── agents/                         # Example agents
 │   └── testwriter/                 # Test generation agent
 │       ├── __init__.py
-│       ├── run_demo.py             # Demo script for testwriter agent
-│       ├── tools.py                # Testwriter capabilities (steps/tools)
-│       ├── goals.py                # Testwriter goal definitions
-│       ├── schemas.py              # Data schemas for testwriter
-│       ├── adapters.py             # External tool adapters
-│       └── prompts/                # Jinja2 templates for LLM prompts
-│           ├── gen_tests.jinja
-│           ├── repair_tests.jinja
-│           └── lift_coverage.jinja
+│       ├── agent.py                # Facade wiring capabilities into an Agent
+│       ├── capabilities.py         # Steps/Tools orchestrating the pipeline
+│       ├── types.py                # Dataclasses for metadata + config
+│       └── utils.py                # Helper functions for indexing/scoring
 ├── tests/                          # Unit tests
 │   └── test_validate.py
 ├── tests_generated/                # Generated tests by testwriter agent
@@ -413,9 +536,11 @@ ranger/
 │   ├── test_engine_core.py
 │   ├── test_engine_edge_cases.py
 │   └── test_report.json
-├── AGENT_GUIDE.md                  # Quick start guide
-├── LLM_PROVIDER_GUIDE.md          # LLM provider integration guide
-├── UPGRADE.md                      # Architecture and upgrade notes
+├── docs/                           # Additional guides
+│   ├── README.md
+│   ├── AGENT_GUIDE.md
+│   ├── API_REFERENCE.md
+│   └── LLM_PROVIDER_GUIDE.md
 ├── README.md                       # This file
 └── pyproject.toml                  # Project configuration
 ```
@@ -431,7 +556,6 @@ ranger/
 - **`validate.py`**: Value validation and type checking utilities
 - **`hints.py`**: Type hints and validation helpers
 - **`provenance.py`**: Execution provenance tracking for debugging and auditing
-- **`decorators.py`**: Legacy decorators (kept for compatibility)
 
 ## Runners Module
 
@@ -442,10 +566,9 @@ ranger/
 ## Agents Module
 
 - **`testwriter/`**: Complete example agent that generates and improves tests
-  - **`tools.py`**: All testwriter capabilities (indexing, generation, testing, repair)
-  - **`goals.py`**: Goal definitions for test completion and coverage
-  - **`prompts/`**: Jinja2 templates for structured LLM interactions
-  - **`run_demo.py`**: Executable demo showing the agent in action
+  - **`capabilities.py`**: End-to-end pipeline (index → generate → execute → summarise)
+  - **`agent.py`**: Thin façade that exposes a `run()` helper
+  - **`types.py` / `utils.py`**: Shared data structures and helper functions
 
 ---
 

@@ -1,0 +1,101 @@
+{
+  "name": "research-agent",
+  "version": "1.0.0",
+  "description": "Autonomous research agent that searches, analyzes, and generates reports",
+  "state": {
+    "user.query": {
+      "type": "text",
+      "initial": true,
+      "description": "User's research question"
+    },
+    "search.results": {
+      "type": "json",
+      "description": "Raw search results from web"
+    },
+    "analysis.summary": {
+      "type": "text",
+      "description": "Synthesized analysis of search results"
+    },
+    "report.content": {
+      "type": "text",
+      "description": "Final formatted report"
+    },
+    "quality.score": {
+      "type": "number",
+      "description": "Quality metric for the report"
+    }
+  },
+  "capabilities": [
+    {
+      "id": "search_web",
+      "type": "tool",
+      "reads": ["user.query"],
+      "writes": ["search.results"],
+      "description": "Search the web for relevant information",
+      "implementation": {
+        "language": "python",
+        "code": "query = ws.get('user.query')\nresults = search_api(query, limit=10)\nreturn {'search.results': results}"
+      },
+      "tags": ["search", "web"]
+    },
+    {
+      "id": "analyze_results",
+      "type": "llm",
+      "reads": ["search.results", "user.query"],
+      "writes": ["analysis.summary"],
+      "description": "Synthesize search results into key insights",
+      "implementation": {
+        "model": "gpt-4o-mini",
+        "system": "You are a research analyst. Synthesize information into clear insights.",
+        "template": "User asked: {{user.query}}\n\nSearch results:\n{{search.results}}\n\nProvide: executive summary, key findings, and open questions.",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "summary": {"type": "string"},
+            "key_findings": {"type": "array", "items": {"type": "string"}},
+            "open_questions": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "temperature": 0.2
+      },
+      "tags": ["llm", "analysis"]
+    },
+    {
+      "id": "generate_report",
+      "type": "llm",
+      "reads": ["analysis.summary", "user.query"],
+      "writes": ["report.content"],
+      "description": "Generate formatted research report",
+      "implementation": {
+        "model": "gpt-4o-mini",
+        "system": "You are a professional report writer. Create well-structured, citation-rich reports.",
+        "template": "Based on this analysis:\n{{analysis.summary}}\n\nGenerate a comprehensive research report on: {{user.query}}\n\nInclude: title, executive summary, detailed findings, conclusions, and recommendations.",
+        "temperature": 0.3
+      },
+      "tags": ["llm", "writing"]
+    },
+    {
+      "id": "validate_quality",
+      "type": "step",
+      "reads": ["report.content"],
+      "writes": ["quality.score"],
+      "description": "Calculate quality metrics for the report",
+      "implementation": {
+        "language": "python",
+        "code": "report = ws.get('report.content')\nword_count = len(report.split())\nhas_structure = all(section in report.lower() for section in ['summary', 'findings', 'conclusion'])\nquality = min(1.0, word_count / 500) * (1.0 if has_structure else 0.5)\nreturn {'quality.score': quality}"
+      },
+      "tags": ["validation"]
+    }
+  ],
+  "goal": {
+    "scope": ["report.content", "quality.score"],
+    "validation": "quality = ws.get('quality.score', 0)\nreturn quality >= 0.7",
+    "description": "Research report generated with quality score >= 0.7"
+  },
+  "budget": {
+    "tokens": 10000,
+    "ms": 60000,
+    "calls": 20
+  }
+}
+

@@ -1,0 +1,74 @@
+# Ranger Topology Configuration
+# OPTIONAL - You don't need this file! 
+# Use boot.py for simple programmatic setup instead.
+
+# Global budget settings
+budget:
+  tokens: 12000
+  ms: 60000
+  calls: 12
+  byModality:
+    text: 9000
+    code: 2000
+    table: 1000
+    json: 500
+    image: 0
+    log: 500
+    binary: 0
+
+# Region configurations
+regions:
+  # Memory regions
+  - mem.sqlite:
+      key: mem.sqlite
+      path: ./ranger.db
+      domain: code
+      
+  # Guard regions  
+  - guard.pii:
+      key: guard.pii
+      mode: mask
+      
+  # Model regions
+  - llm.openai:
+      key: llm.oai.gpt
+      model: gpt-4
+      temperature: 0.2
+      
+  # Tool regions
+  - tool.aws.ec2:
+      key: tool.aws.ec2
+      region: us-east-1
+
+# Planner preferences
+planner:
+  prefer:
+    - minimize(cost)
+    - maximize(attestationTrust)
+  require:
+    - guard.* before tool.*
+    - memory.* before model.*
+  weights:
+    latency: 1.0
+    token: 0.1
+    risk: 2.0
+    trust: 0.5
+
+# Attestation settings
+attestation:
+  secret_key_env: RANGER_SECRET_KEY
+  signature_version: "1.0"
+  verify_chains: true
+
+# Redaction rules
+redaction:
+  redact_pii: true
+  restrict_acl: false
+  restricted_domains: []
+  sensitive_keys:
+    - password
+    - secret
+    - key
+    - token
+    - auth
+    - credential

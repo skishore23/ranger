@@ -10,9 +10,9 @@ This module provides the primary user-facing API for Ranger:
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Optional, Set, Union, Protocol
-from functools import wraps
+import os
 import inspect
+from typing import Any, Callable, Dict, List, Optional, Set, Union, Protocol
 from .capability import Capability
 from .engine import Engine
 from .workspace import Snapshot
@@ -21,6 +21,8 @@ from .errors import SolveResult
 from .runners.python_runner import PythonRunner
 from .runners.llm_runner import LLMRunner
 from .runners.human_runner import HumanRunner
+from .llm.provider import RegionBackedProvider, resolve_llm_profile
+from topology.types import Budget
 
 
 class LLMProvider(Protocol):
@@ -53,42 +55,30 @@ def _base(
     *,
     inputs: Optional[Union[List[str], Set[str]]] = None,
     outputs: Optional[Union[List[str], Set[str]]] = None,
-    uses: Optional[Union[List[str], Set[str]]] = None,
-    updates: Optional[Union[List[str], Set[str]]] = None,
     pure: bool,
     runner: Optional[Any] = None,
     tags: Optional[Set[str]] = None,
     write_specs: Optional[Dict[str, WriteSpec]] = None,
     post: Optional[Callable[[Snapshot, Dict[str, Any]], bool]] = None,
+    name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Callable[[Callable], Capability]:
     """Base decorator for creating capabilities.
-    
+
     Args:
         inputs: Fields this capability reads from workspace
         outputs: Fields this capability writes to workspace
-        uses: Alias for inputs (silent compatibility)
-        updates: Alias for outputs (silent compatibility)
         pure: True for compute-only, False for actions with side effects
         runner: Custom runner (defaults to PythonRunner)
         tags: Optional tags for scheduling/telemetry hints
         write_specs: Optional specifications for how to write fields
         post: Optional post-execution validation function
-    
+
     Returns:
         Capability that can be used with Agent
     """
     def decorator(fn: Callable[[Snapshot], Optional[Dict[str, Any]]]) -> Capability:
-        # Handle aliases with conflict detection
-        if inputs is not None and uses is not None and set(inputs) != set(uses):
-            raise ValueError("Cannot specify conflicting 'inputs' and 'uses' parameters")
-        if outputs is not None and updates is not None and set(outputs) != set(updates):
-            raise ValueError("Cannot specify conflicting 'outputs' and 'updates' parameters")
-        
-        # Use primary names, fall back to aliases
-        final_inputs = inputs if inputs is not None else uses
-        final_outputs = outputs if outputs is not None else updates
-        
-        reads, writes = _normalize_inputs_outputs(final_inputs, final_outputs)
+        reads, writes = _normalize_inputs_outputs(inputs, outputs)
         
         # Default runner based on purity
         actual_runner = runner or PythonRunner(fn)
@@ -100,17 +90,22 @@ def _base(
         else:
             actual_tags.add("action")
         
-        # Create default write specs if none provided
-        default_write_specs = write_specs or {k: WriteSpec() for k in writes}
-        
+        # Create default write specs and ensure every write key is covered
+        default_write_specs: Dict[str, WriteSpec] = dict(write_specs) if write_specs else {}
+        for key in writes:
+            default_write_specs.setdefault(key, WriteSpec())
+
+        cap_id = name or f"{fn.__module__}.{fn.__name__}"
+
         return Capability(
-            id=fn.__name__,
+            id=cap_id,
             reads=reads,
             writes=writes,
             runner=actual_runner,
             post=post,
             write_specs=default_write_specs,
             tags=actual_tags,
+            metadata=dict(metadata) if metadata else None,
         )
     
     return decorator
@@ -120,23 +115,21 @@ def step(
     *,
     inputs: Optional[Union[List[str], Set[str]]] = None,
     outputs: Optional[Union[List[str], Set[str]]] = None,
-    uses: Optional[Union[List[str], Set[str]]] = None,
-    updates: Optional[Union[List[str], Set[str]]] = None,
     tags: Optional[Set[str]] = None,
     write_specs: Optional[Dict[str, WriteSpec]] = None,
     post: Optional[Callable[[Snapshot, Dict[str, Any]], bool]] = None,
+    name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Callable[[Callable], Capability]:
     """Create a step (pure transform with no side effects).
     
     Args:
         inputs: Fields this step reads from workspace
         outputs: Fields this step writes to workspace
-        uses: Alias for inputs (silent compatibility)
-        updates: Alias for outputs (silent compatibility)
         tags: Optional tags for scheduling/telemetry hints
         write_specs: Optional specifications for how to write fields
         post: Optional post-execution validation function
-    
+
     Returns:
         Capability that can be used with Agent
     """
@@ -146,12 +139,12 @@ def step(
     return _base(
         inputs=inputs,
         outputs=outputs,
-        uses=uses,
-        updates=updates,
         pure=True,
         tags=step_tags,
         write_specs=write_specs,
         post=post,
+        name=name,
+        metadata=metadata,
     )
 
 
@@ -159,23 +152,21 @@ def tool(
     *,
     inputs: Optional[Union[List[str], Set[str]]] = None,
     outputs: Optional[Union[List[str], Set[str]]] = None,
-    uses: Optional[Union[List[str], Set[str]]] = None,
-    updates: Optional[Union[List[str], Set[str]]] = None,
     tags: Optional[Set[str]] = None,
     write_specs: Optional[Dict[str, WriteSpec]] = None,
     post: Optional[Callable[[Snapshot, Dict[str, Any]], bool]] = None,
+    name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Callable[[Callable], Capability]:
     """Create a tool (action that may have side effects).
     
     Args:
         inputs: Fields this tool reads from workspace
         outputs: Fields this tool writes to workspace
-        uses: Alias for inputs (silent compatibility)
-        updates: Alias for outputs (silent compatibility)
         tags: Optional tags for scheduling/telemetry hints
         write_specs: Optional specifications for how to write fields
         post: Optional post-execution validation function
-    
+
     Returns:
         Capability that can be used with Agent
     """
@@ -185,12 +176,12 @@ def tool(
     return _base(
         inputs=inputs,
         outputs=outputs,
-        uses=uses,
-        updates=updates,
         pure=False,
         tags=tool_tags,
         write_specs=write_specs,
         post=post,
+        name=name,
+        metadata=metadata,
     )
 
 
@@ -200,7 +191,8 @@ def llm(
     *,
     inputs: Optional[Union[List[str], Set[str]]] = None,
     outputs: Optional[Union[List[str], Set[str]]] = None,
-    model: str = "gpt-4o-mini",
+    profile: Optional[str] = None,
+    model: Optional[str] = None,
     system: Optional[str] = None,
     template: Optional[str] = None,
     schema: Optional[Union[Dict[str, Any], str]] = None,
@@ -209,6 +201,12 @@ def llm(
     provider: Optional[LLMProvider] = None,
     map: Optional[Callable[[Snapshot], Dict[str, Any]]] = None,
     write_specs: Optional[Dict[str, WriteSpec]] = None,
+    region_key: Optional[str] = None,
+    region_budget: Optional[Dict[str, Any]] = None,
+    region_options: Optional[Dict[str, Any]] = None,
+    post: Optional[Callable[[Snapshot, Dict[str, Any]], bool]] = None,
+    name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Callable[[Callable], Capability]:
     """Create an LLM tool (convenience wrapper around @tool).
     
@@ -229,9 +227,43 @@ def llm(
         Capability that can be used with Agent
     """
     def decorator(fn: Callable) -> Capability:
-        if provider is None:
-            raise ValueError("LLM tool requires a provider")
-        
+        actual_provider = provider
+        profile_name: Optional[str] = None
+        provider_defaults: Dict[str, Any] = {}
+
+        if profile is not None:
+            if any(param is not None for param in (provider, region_key, region_budget, region_options)):
+                raise ValueError("When using profile=..., do not supply provider/region overrides")
+            profile_name = profile
+        else:
+            if actual_provider is None:
+                resolved_key = region_key or os.environ.get("RANGER_DEFAULT_LLM_REGION")
+                if not resolved_key:
+                    raise ValueError(
+                        "LLM tool requires a provider, region_key, or profile"
+                    )
+                actual_provider = RegionBackedProvider(
+                    resolved_key,
+                    budget=region_budget,
+                    default_options=region_options,
+                )
+            provider_defaults = {}
+
+        if profile_name is None:
+            resolved_model = model or provider_defaults.get("model") or "gpt-4o-mini"
+            resolved_system = system or provider_defaults.get("system")
+            resolved_temperature = (
+                temperature if temperature is not None else provider_defaults.get("temperature")
+            )
+            resolved_max_tokens = (
+                max_tokens if max_tokens is not None else provider_defaults.get("max_tokens")
+            )
+        else:
+            resolved_model = model
+            resolved_system = system
+            resolved_temperature = temperature
+            resolved_max_tokens = max_tokens
+
         # Parse schema if it's a string
         parsed_schema = None
         if isinstance(schema, str):
@@ -239,16 +271,18 @@ def llm(
             parsed_schema = json.loads(schema)
         elif schema is not None:
             parsed_schema = schema
-        
+
         runner = LLMRunner(
-            provider=provider,
-            model=model,
-            system=system,
+            provider=actual_provider,
+            model=resolved_model,
+            system=resolved_system,
             template=template,
             schema=parsed_schema,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=resolved_temperature,
+            max_tokens=resolved_max_tokens,
             map_fn=map,
+            profile_name=profile_name,
+            profile_defaults=provider_defaults,
         )
         
         # Use base decorator with LLM runner (LLMs are actions, not pure compute)
@@ -260,6 +294,9 @@ def llm(
             runner=runner,
             tags=llm_tags,
             write_specs=write_specs,
+            post=post,
+            name=name,
+            metadata=metadata,
         )(fn)
     
     return decorator
@@ -275,6 +312,8 @@ def human(
     description: Optional[str] = None,
     fields: Optional[List[Dict[str, Any]]] = None,
     write_specs: Optional[Dict[str, WriteSpec]] = None,
+    name: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Callable[[Callable], Capability]:
     """Create a human collaboration tool (convenience wrapper around @tool).
     
@@ -294,9 +333,10 @@ def human(
             title=title,
             description=description,
             fields=fields,
+            callback=fn,
+            write_keys=list(outputs or []),
         )
-        
-        # Use base decorator with Human runner (Human collaboration is an action)
+
         human_tags = {"human", "action"}
         return _base(
             inputs=inputs,
@@ -305,6 +345,8 @@ def human(
             runner=runner,
             tags=human_tags,
             write_specs=write_specs,
+            name=name,
+            metadata=metadata,
         )(fn)
     
     return decorator
@@ -332,13 +374,14 @@ def goal(
 class Agent:
     """Topological agent that executes tools to reach goals."""
     
-    def __init__(self, tools: List[Capability]):
+    def __init__(self, tools: List[Capability], *, budget: Budget | None = None):
         """Initialize agent with tools.
         
         Args:
             tools: List of tools this agent can execute
+            budget: Optional topology budget overrides
         """
-        self.engine = Engine(tools)
+        self.engine = Engine(tools, budget=budget)
     
     def run(
         self,

@@ -1,7 +1,7 @@
 """Python function runner implementation."""
 
 from __future__ import annotations
-from typing import Callable, Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, List
 from ..workspace import Snapshot
 from ..capability import Capability
 
@@ -17,7 +17,12 @@ class PythonRunner:
         """
         self._fn = fn
 
-    def run(self, cap: Capability, snap: Snapshot) -> Dict[str, Any]:
+    def run(
+        self,
+        cap: Capability,
+        snap: Snapshot,
+        context: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
         """Execute Python function capability.
         
         Args:
