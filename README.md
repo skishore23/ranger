@@ -247,7 +247,7 @@ sequenceDiagram
 
 ---
 
-# 5) A pragmatic Test-Writer (production-flavored)
+# 5) A Test-Writer
 
 ### 5.1 State keys (convention)
 
