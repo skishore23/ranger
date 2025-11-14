@@ -2,14 +2,14 @@
 
 This guide shows you how to build production-grade agents with **zero orchestration code**. You write tiny Python functions, declare what each one **reads** and **writes** in a shared **State**, and call `Agent.run(...)`. The engine figures out *when* to run each unit, runs safe work in parallel, and stops when your **Goal** is true.
 
-> ## DX vocabulary (plain English)
+> ## DX vocabulary
 >
 > * **Step** — a **pure transform** over State (no side effects).
 > * **Tool** — an **action** that may have side effects (CLI/API/LLM/Human).
 > * **Goal** — a predicate over State that means “we’re done.”
 > * **Agent** — runs ready Steps/Tools until the Goal is satisfied.
-> * Sugar: `@llm` (LLM Tool), `@human` (review/approval Tool).
-> * Param names: prefer **`inputs` / `outputs`** (we also accept `uses` / `updates` as aliases).
+> * **Decorators: `@llm` (LLM Tool), `@human` (review/approval Tool).
+> * **Param names: prefer **`inputs` / `outputs`** (we also accept `uses` / `updates` as aliases).
 
 ---
 
