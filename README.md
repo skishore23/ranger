@@ -1,43 +1,30 @@
-Here’s a fresh README you can drop straight into `README.md` and tweak as you like:
-
----
-
-````markdown
 # Ranger — Evidence-Driven Execution Engine for LLM Systems
 
 > **Status:** Experimental / pre-1.0. APIs and folder layout may change.
 
-Ranger is a **topology-style execution engine** for building long-running, stateful workflows around LLMs, tools, and humans.
+Ranger is a topology-style execution engine for long-running, stateful workflows that blend LLMs, tools, and human input. Capabilities are small, typed functions that declare the State keys they read and the facts they write. The engine assembles those declarations into a directed topology and advances execution strictly according to the evidence already present in State.
 
-Instead of hand-written orchestration loops, you write small Python functions that declare:
-
-- which **State** keys they read, and  
-- which **State** keys they write.
-
-Ranger figures out **what to run, when, and in parallel**, stores the full run in a local database, and lets you replay and inspect everything after the fact. “Agents” are just one pattern built on top of this engine.
+Instead of hand-written orchestration loops, you describe transformations. Ranger decides what should run, when batching is safe, and how to merge results. Every run is preserved in a local evidence store so you can replay decisions, audit timings, and trace outcomes end-to-end. “Agents” are simply one expression of this model.
 
 ---
 
 ## Why Ranger?
 
-Ranger is meant for people who care more about **reproducibility, provenance, and control** than about yet another chat loop.
+Ranger is built for teams that prioritize reproducibility, provenance, and operational control over improvised chat loops.
 
-- **Execution engine, not just an agent framework**  
-  Use it for test writers, research pipelines, guardrails, ETL-ish flows, or anything that naturally looks like “compute new facts from existing facts”.
+- **Evidence-driven core**  
+  Each run is captured end-to-end inside `.ranger/<domain>.db`: snapshots, coverage, timings, and goal evaluations. That record becomes the system of record for audits, regression analysis, and incident response.
 
-- **Evidence-driven**  
-  All state for a run lives in one place (`.ranger/<domain>.db`), together with coverage, timing, and goal status. You can replay and inspect runs later.
+- **Deterministic scheduling**  
+  Capabilities activate only when their declared inputs exist and at least one output needs to change. Ranger batches only disjoint writers, providing concurrency without races.
 
 - **Zero orchestration code**  
-  You never write the “while not done: call tool A, then B” loop. The engine watches how State changes and activates only the capabilities that are now ready.
+  There are no while-loops, callbacks, or bespoke planners to maintain. Control flow emerges from the topology of State updates.
 
-- **Safe parallelism by construction**  
-  Ranger only batches capabilities that write to disjoint State keys. That gives you concurrency without data races.
+- **Guardrail-ready**  
+  Explicit read/write contracts make it straightforward to hang policy checks, risk scoring, or guard regions around the engine without buried logic.
 
-- **Guardrail-friendly**  
-  Because all reads/writes are explicit, it’s easy to hang guard regions, policy checks, or risk scoring around the engine without hiding logic in callbacks.
-
-If you like **dataflow / category-theory flavored** ways of thinking (“everything is a morphism over shared context”), Ranger is built for that.
+If you favor dataflow and category theory inspired abstractions—morphisms over shared context—Ranger mirrors that philosophy.
 
 ---
 
@@ -54,26 +41,25 @@ At the core there are just three ideas:
        "tests.gen": {...},
        "run.result": {...},
    }
-````
+   ```
 
-2. **Capabilities (Steps / Tools / LLMs / Humans)**
+2. **Capabilities (Steps / Tools / LLMs / Humans)**  
    Each capability declares:
 
-   * `inputs=[...]` – the keys it must see in State before running
-   * `outputs=[...]` – the keys it promises to write back into State
+   - `inputs=[...]` – the keys it must see in State before running  
+   - `outputs=[...]` – the keys it promises to write back into State
 
    It returns a small dict of `{key: value}` updates; Ranger merges that into the snapshot atomically.
 
-3. **Planner + Goal**
+3. **Planner + Goal**  
 
-   * A capability becomes **ready** when:
+   - A capability becomes **ready** when:
+     - all its `inputs` exist in State, and  
+     - at least one of its `outputs` is missing, **or** any input changed since it last ran.
+   - The engine takes a snapshot, finds all ready units, picks a **compatible batch** (no two write the same key), runs them, commits, and repeats.
+   - After each batch, a **Goal** predicate checks whether you’re done (or explains why you’re blocked).
 
-     * all its `inputs` exist in State, and
-     * at least one of its `outputs` is missing, **or** any input changed since it last ran.
-   * The engine takes a snapshot, finds all ready units, picks a **compatible batch** (no two write the same key), runs them, commits, and repeats.
-   * After each batch, a **Goal** predicate checks whether you’re done (or explains why you’re blocked).
-
-In (very rough) pseudo-diagram:
+Execution topology at a glance:
 
 ```mermaid
 flowchart TD
@@ -87,22 +73,34 @@ flowchart TD
   G -- "Yes" --> D["Done"]
 ```
 
-No loops or if/else chains in user code. All control flow **emerges** from how State evolves.
+- **Snapshot(State)** freezes the current evidence so readiness decisions are deterministic and replayable.
+- **Find ready capabilities** surfaces every transformation whose declared inputs exist and at least one promised output still needs to be written.
+- **Choose batch with disjoint outputs** enforces conflict-free parallelism; the topology rejects any combination that would contend for the same key.
+- **Execute batch → Merge results** runs the selected morphisms, merges their updates atomically, and records provenance alongside timings.
+- **Goal satisfied?** evaluates a declarative predicate that either certifies completion or explains which facts are still missing.
+
+No loops or if/else chains live in user code. Control flow **emerges** from how State evolves.
 
 ---
 
 ## DX Vocabulary
 
-You’ll mostly work with these decorators and types:
+Everything you ship inside Ranger is a typed morphism over `State`. Decorators describe the semantics of that morphism so the topology, planner, and runners can reason about it deterministically.
 
-* **`@step`** – Pure transform over State (no side effects).
-* **`@tool`** – Side-effecting action (HTTP calls, subprocesses, filesystem, etc.).
-* **`@llm`** – Tool specialized for LLM calls (prompt + schema + retries + provider).
-* **`@human`** – Human-in-the-loop action (for review / approvals; UI layer is WIP).
-* **`@goal`** – Predicate over State that decides when a run is finished.
-* **`Agent`** – Minimal runner that repeatedly applies ready capabilities until the goal passes or you hit a budget.
+- **`@step`** – Pure function that reads immutable inputs, emits new facts, and can be retried freely. Validation in `core.validate` makes sure you only reference declared keys.  
+- **`@tool`** – Side-effecting capability (HTTP calls, shell work, filesystem, etc.) executed through the Python runner. Declares exactly which State it mutates so provenance stays intact.  
+- **`@llm`** – Structured LLM call configured through `core.llm.provider`. Prompts, schemas, and retry policies are part of the decorator, keeping generations reproducible.  
+- **`@human`** – Human-in-the-loop checkpoint executed by `core.runners.human_runner`, often used for attestation or approvals.  
+- **`@goal`** – Declarative predicate that certifies completion or explains why you are still blocked.  
+- **`Agent`** – Thin runner (`core.engine.Agent`) that keeps applying ready capabilities inside your budget until the goal passes.
 
-All of these work over the same `State` object; the difference is semantics (pure vs side-effecting vs LLM vs human).
+All decorators operate on the same immutable snapshot. Ranger enforces fail-fast semantics: missing inputs or conflicting outputs cause immediate validation errors instead of silent fallbacks.
+
+### State contracts & provenance
+
+- **Contracts** – `core.capability` and `core.plan` track every key that a capability reads or writes, enabling deterministic scheduling and guardrail enforcement.  
+- **Provenance** – `core.provenance` records coverage, timings, and evidence for every capability so you can replay or audit any run later.  
+- **Topology** – Modules under `topology/` (planner, packer, attest) construct the execution graph, ensure disjoint writes, and certify batches before they ever reach a runner.
 
 ---
 
@@ -138,6 +136,8 @@ There is **no orchestration** in this script. The engine:
 1. Sees `"a"` → runs `inc` → writes `"b"`.
 2. Sees `"b"` → runs `double` → writes `"c"`.
 3. Goal sees `"c == 4"` → run finishes.
+
+That entire trace is stored in `.ranger/demo.db`: the snapshot deltas, timings, and goal evaluations. You can replay it with `ranger scenario`, diff it against future runs, or visualize it with `ranger visualize` to confirm the topology behaves as intended.
 
 ---
 
@@ -210,10 +210,12 @@ if __name__ == "__main__":
 
 The engine automatically:
 
-* loops between **Reason → Plan → Search** while `thought == "search"`,
-* then shifts to **Reason → Write** once there are enough observations.
+- loops between **Reason → Plan → Search** while `thought == "search"`,  
+- then shifts to **Reason → Write** once there are enough observations.
 
 You never write that loop explicitly.
+
+Behind the scenes, `topology.planner` keeps recomputing readiness as new evidence lands in `"obs"`, and the attestation layer (`topology.attest`) ensures that the `think`, `plan`, `search`, and `write` capabilities never race over the same keys. The scenario database retains every prompt, response, and decision, so you can audit why a particular answer was produced.
 
 ---
 
@@ -258,16 +260,17 @@ The scaffold mirrors the bundled agents and wires up memory + LLM regions via `b
 
 ## Agents, Plans, and Runtime
 
-For larger projects you’ll usually:
+For larger projects you codify a plan once and let the runtime enforce it with evidence checks:
 
-* Build **plain capabilities** with `@step`, `@tool`, `@llm`, `@human`.
-* Compose them into a **Plan** using `core.plan.plan` and `core.plan.action`.
-* Wrap the compiled plan in an **`AgentRuntime`** subclass that:
+- Build **plain capabilities** with `@step`, `@tool`, `@llm`, `@human`.
+- Compose them into a **Plan** using `core.plan.plan` and `core.plan.action`.
+- Wrap the compiled plan in an **`AgentRuntime`** subclass that:
+  - configures memory domains and filenames,
+  - registers LLM profiles,
+  - applies guard regions,
+  - exposes a simple `.run(...)` facade for callers.
 
-  * configures memory domains and filenames,
-  * registers LLM profiles,
-  * applies guard regions,
-  * exposes a simple `.run(...)` facade for callers.
+`agents/common/runtime.AgentRuntime` wires those pieces into budgets, attestation, and visualization hooks so you can focus on the morphology of your domain rather than wiring.
 
 Example sketch:
 
@@ -316,33 +319,35 @@ class MyAgent(AgentRuntime):
 
 `AgentRuntime` takes care of registry resets, scenario harness, and visualization so your façade stays small.
 
+Attach regions (see `regions/`) for external memory or LLM providers, and the topology registry (`topology/registry.py`) will make the new capabilities available to the planner automatically.
+
 ---
 
 ## Scenarios, Traces, and Visualization
 
 Every run is backed by a **scenario database** under `.ranger/`. For a given domain:
 
-* **State snapshots** (before/after each batch)
-* **Capability executions** (inputs, outputs, timings)
-* **Goal evaluations** and “why not yet done” explanations
+- **State snapshots** (before/after each batch)
+- **Capability executions** (inputs, outputs, timings)
+- **Goal evaluations** and “why not yet done” explanations
 
 all land in one file, e.g. `.ranger/testwriter.db`.
 
 You can then:
 
-* Inspect raw atoms:
+- Inspect raw atoms:
 
   ```bash
   ranger trace testwriter.db --domain testwriter --limit 50
   ```
 
-* Replay and summarize:
+- Replay and summarize:
 
   ```bash
   ranger scenario testwriter.db --domain testwriter --json
   ```
 
-* Render a capability graph:
+- Render a capability graph:
 
   ```bash
   ranger visualize agents.testwriter.agent:TestWriterAgent --repo . --format svg
@@ -350,20 +355,24 @@ You can then:
 
 This makes Ranger feel closer to a **build system or debugger** than to a black-box chatbot.
 
+`ranger/scenario.py` drives those commands by replaying entries from `.ranger/<domain>.db` and rehydrating the provenance captured by `core.provenance`. Because every snapshot and capability write is recorded, audits become a matter of querying evidence rather than reproducing a flaky chat transcript.
+
 ---
 
 ## Repository Layout
 
 This repo is organized into a few layers:
 
-* `core/` – the engine: State, Snapshot, planner, runners, plan builder, LLM provider wiring.
-* `ranger/` – CLI entry points and developer tooling.
-* `agents/` – example agents (test-writer, deep research, etc.) built on top of the engine.
-* `regions/`, `topology/`, `studio/` – experiments around guard regions, topology primitives, and UI (subject to change).
-* `docs/` – reference documentation and longer guides.
-* `tests/` – unit/integration tests for the engine and example agents.
+- `core/` – the engine: State snapshots, planner, runners, merge logic, provenance tracking, validation, and visualization support.  
+- `ranger/` – CLI entry points plus tooling for tracing, visualization, and scaffolding.  
+- `agents/` – sample agents (test-writer, deep research) that show how to pair plans with runtime facades.  
+- `regions/` – memory and provider bindings (SQLite memory, OpenAI LLM, etc.) that you can register inside runtimes.  
+- `topology/` – attesters, packers, planners, and registries that build the execution graph from declared capabilities.  
+- `studio/` – experimental UI + topology builder tooling.  
+- `docs/` – API and agent guides.  
+- `tests/` – unit and integration coverage for engine, runners, and bundled agents.
 
-You can depend only on `core/` + `ranger/` if you just want the engine; the contents of `agents/` are examples / recipes.
+Depending only on `core/` + `ranger/` gives you the execution engine and CLI; `agents/` and `regions/` stay optional reference implementations.
 
 ---
 
@@ -371,37 +380,16 @@ You can depend only on `core/` + `ranger/` if you just want the engine; the cont
 
 Ranger is a good fit if:
 
-* You are building **non-trivial LLM systems** (test writers, research agents, safety pipelines, etc.) that:
-
-  * touch many sources of truth,
-  * have multiple asynchronous or side-effecting steps,
-  * need **replayable, explainable** behavior.
-* You want to treat orchestration as a **data problem** (“what facts do we know now, what can we compute next?”) instead of manually coding loops.
-* You care about **guardrails** and **risk controls** that can inspect and shape State over time.
+- You are building **non-trivial LLM systems** (test writers, research agents, safety pipelines, etc.) that:
+  - touch many sources of truth,
+  - have multiple asynchronous or side-effecting steps,
+  - need **replayable, explainable** behavior.
+- You want to treat orchestration as a **data problem** (“what facts do we know now, what can we compute next?”) instead of manually coding loops.
+- You care about **guardrails** and **risk controls** that can inspect and shape State over time.
 
 It might be overkill if:
 
-* You just need a single LLM call plus one or two tools.
-* You don’t care about replay, provenance, or long-term maintainability of flows.
+- You just need a single LLM call plus one or two tools.
+- You don’t care about replay, provenance, or long-term maintainability of flows.
 
 ---
-
-## Documentation & Next Steps
-
-Extended docs live under `docs/`:
-
-* `docs/API_REFERENCE.md` – concise API map for decorators, engine types, and CLI.
-* `docs/AGENT_GUIDE.md` (planned) – deeper guide to building agents using `AgentRuntime` and plans.
-* `docs/LLM_PROVIDER_GUIDE.md` (planned) – wiring different LLM providers and profiles.
-
-Planned improvements:
-
-* More example agents (e.g., guardrail-heavy flows).
-* Better studio / UI for inspecting runs and human-in-the-loop steps.
-* Richer guard region integration.
-* Distributed execution and worker pools.
-
-```
-
-::contentReference[oaicite:0]{index=0}
-```
