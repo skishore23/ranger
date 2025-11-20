@@ -2,29 +2,28 @@
 
 > **Status:** Experimental / pre-1.0. APIs and folder layout may change.
 
-Ranger is a small execution engine for long-running, stateful workflows that blend LLMs, tools, and human input. You write small, typed capabilities that declare which State keys they read and which facts they write. Ranger uses those declarations to decide what can run next, when batching is safe, and how to merge results—so you don’t have to hand-write orchestration loops.
+Ranger is an execution engine for running long-lived, stateful workflows that use LLMs, tools, and human input. You write plain Python functions that say what data they need and what data they produce. Ranger figures out the order to run them and records each step in a local database so you can inspect, replay, and compare runs later.
 
-Every run is recorded in a local evidence store, with full state snapshots and tool I/O. That lets you replay decisions, diff behavior across models or prompts, and audit outcomes end-to-end. “Agents” are just one way to shape these workflows; Ranger stays focused on execution, replay, and evidence, not on prescribing an agent framework.
+Instead of hand-rolled `while True` loops and ad-hoc logging, you get a simple dataflow:
+state goes in → steps fire when their inputs are ready → new state comes out. Ranger keeps the full trace so you can see how a result was produced and how a change in model, prompt, or code affects behavior.
 
 ---
 
-## Why Ranger?
+## What you get 
 
-Ranger is built for teams that prioritize reproducibility, provenance, and operational control over improvised chat loops.
+- **Replayable runs**  
+  Every run is stored in `.ranger/<domain>.db` with state snapshots and step metadata. You can re-run a scenario, step through it, or diff runs across versions.
 
-- **Evidence-driven core**  
-  Each run is captured end-to-end inside `.ranger/<domain>.db`: snapshots, coverage, timings, and goal evaluations. That record becomes the system of record for audits, regression analysis, and incident response.
+- **Automatic scheduling**  
+  Steps declare the keys they read and write. Ranger only runs a step when its inputs are present and at least one output needs an update, and it batches non-conflicting steps for a bit of parallelism.
 
-- **Deterministic scheduling**  
-  Capabilities activate only when their declared inputs exist and at least one output needs to change. Ranger batches only disjoint writers, providing concurrency without races.
+- **Less orchestration code**  
+  Most control flow falls out of the data dependencies. You focus on small, testable functions; Ranger takes care of “what should run next?”
 
-- **Zero orchestration code**  
-  There are no while-loops, callbacks, or bespoke planners to maintain. Control flow emerges from the topology of State updates.
+- **Guardrail-friendly**  
+  Because reads and writes are explicit, it’s straightforward to layer policies, checks, or risk scoring around the engine without burying them in glue code.
 
-- **Guardrail-ready**  
-  Explicit read/write contracts make it straightforward to hang policy checks, risk scoring, or guard regions around the engine without buried logic.
-
-If you favor dataflow and category theory inspired abstractions—morphisms over shared context—Ranger mirrors that philosophy.
+If you like treating workflows as dataflow—“what do we know now, what can we safely compute next?”—Ranger is built with that style in mind.
 
 ---
 
