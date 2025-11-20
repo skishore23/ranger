@@ -2,9 +2,9 @@
 
 > **Status:** Experimental / pre-1.0. APIs and folder layout may change.
 
-Ranger is a topology-style execution engine for long-running, stateful workflows that blend LLMs, tools, and human input. Capabilities are small, typed functions that declare the State keys they read and the facts they write. The engine assembles those declarations into a directed topology and advances execution strictly according to the evidence already present in State.
+Ranger is a small execution engine for long-running, stateful workflows that blend LLMs, tools, and human input. You write small, typed capabilities that declare which State keys they read and which facts they write. Ranger uses those declarations to decide what can run next, when batching is safe, and how to merge results—so you don’t have to hand-write orchestration loops.
 
-Instead of hand-written orchestration loops, you describe transformations. Ranger decides what should run, when batching is safe, and how to merge results. Every run is preserved in a local evidence store so you can replay decisions, audit timings, and trace outcomes end-to-end. “Agents” are simply one expression of this model.
+Every run is recorded in a local evidence store, with full state snapshots and tool I/O. That lets you replay decisions, diff behavior across models or prompts, and audit outcomes end-to-end. “Agents” are just one way to shape these workflows; Ranger stays focused on execution, replay, and evidence, not on prescribing an agent framework.
 
 ---
 
