@@ -2,7 +2,7 @@
 
 > **Status:** Experimental / pre-1.0. APIs and folder layout may change.
 
-Ranger is an execution engine for running long-lived, stateful workflows that use LLMs, tools, and human input. You write plain Python functions that say what data they need and what data they produce. Ranger figures out the order to run them and records each step in a local database so you can inspect, replay, and compare runs later.
+Ranger is an execution engine for long-lived, stateful workflows that use LLMs, tools, and human input. You write plain Python functions that declare what data they need and what data they produce. Ranger figures out the order to run them and records each step in a local database so you can inspect, replay, and compare runs later.
 
 Instead of hand-rolled `while True` loops and ad-hoc logging, you get a simple dataflow:
 state goes in → steps fire when their inputs are ready → new state comes out. Ranger keeps the full trace so you can see how a result was produced and how a change in model, prompt, or code affects behavior.
