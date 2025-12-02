@@ -1,4 +1,4 @@
-# Ranger — Evidence-Driven Execution Engine for LLM Systems
+# Ranger — Evidence-First Execution Engine.
 
 > **Status:** Experimental / pre-1.0. APIs and folder layout may change.
 
