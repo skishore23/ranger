@@ -93,7 +93,7 @@ Everything you ship inside Ranger is a typed morphism over `State`. Decorators d
 - **`@goal`** – Declarative predicate that certifies completion or explains why you are still blocked.  
 - **`Agent`** – Thin runner (`core.engine.Agent`) that keeps applying ready capabilities inside your budget until the goal passes.
 
-All decorators operate on the same immutable snapshot. Ranger enforces fail-fast semantics: missing inputs or conflicting outputs cause immediate validation errors instead of silent fallbacks.
+All decorators operate on the same immutable snapshot.
 
 ### State contracts & provenance
 
