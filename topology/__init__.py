@@ -2,9 +2,9 @@
 
 from .types import Atom, Budget, Region, Path, ContextWindow, Modality, RegionKind
 from .registry import register_region, get_region, list_regions, clear_registry, has_region
-from .planner import plan_path
+from .planner import plan_path, PlannerConfig
 from .stitch import summarize_regions, reconcile_overlaps, repair_context
-from .packer import pack_context
+from .packer import pack_context, default_token_estimator
 from .lenses import args_only, redact, apply_modality_caps
 from .attest import (
     create_atom_id,
@@ -29,10 +29,12 @@ __all__ = [
     "clear_registry",
     "has_region",
     "plan_path",
+    "PlannerConfig",
     "summarize_regions",
     "reconcile_overlaps",
     "repair_context",
     "pack_context",
+    "default_token_estimator",
     "args_only",
     "redact",
     "apply_modality_caps",

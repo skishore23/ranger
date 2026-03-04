@@ -238,3 +238,27 @@ class TestGuardGating:
         assert reconciled is not None
         assert reason == "stricter_redaction_wins"
         assert reconciled.policy.get("redacted", False)
+
+
+    def test_finding_ids_are_stable(self):
+        """Test finding IDs are deterministic for same input."""
+        from topology.registry import get_region
+
+        guard = get_region("guard.pii")
+        assert guard is not None
+
+        atom = Atom(
+            id="stable",
+            modality="text",
+            content="Email me at stable@example.com",
+            schema="test.schema@v1",
+            facets={"domain": "test", "ts": 1234567890},
+            provenance={},
+            policy={}
+        )
+
+        first = guard.validate([atom])["findings"]
+        second = guard.validate([atom])["findings"]
+
+        assert len(first) == len(second) == 1
+        assert first[0].id == second[0].id

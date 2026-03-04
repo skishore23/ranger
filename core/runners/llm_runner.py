@@ -1,12 +1,15 @@
 """LLM runner implementation using pluggable providers."""
 
 from __future__ import annotations
+import logging
 
 from typing import Callable, Dict, Any, Optional, List
 
 from ..workspace import Snapshot
 from ..capability import Capability
 from ..llm.provider import LLMProvider, resolve_llm_profile
+
+logger = logging.getLogger(__name__)
 
 
 class SkipLLM(Exception):
@@ -114,10 +117,10 @@ class LLMRunner:
             self.max_tokens if self.max_tokens is not None else profile_defaults.get("max_tokens")
         )
 
-        print(f"   🔍 DEBUG LLM PROMPT:")
-        print(f"   🔍   System: {system}")
-        print(f"   🔍   Prompt: {prompt[:500]}...")
-        print(f"   🔍   Model: {model}, Temp: {temperature}, Max tokens: {max_tokens}")
+        logger.debug(f"   🔍 DEBUG LLM PROMPT:")
+        logger.debug("   🔍   System configured: %s", bool(system))
+        logger.debug("   🔍   Prompt length: %s", len(prompt))
+        logger.debug("   🔍   Model=%s temp=%s max_tokens=%s", model, temperature, max_tokens)
 
         # Generate response
         response = provider.generate(

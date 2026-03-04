@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from typing import List, Dict, Any, Callable, Tuple, Set, Optional
 from .workspace import Workspace, Snapshot
 from .capability import Capability
@@ -16,6 +17,8 @@ from topology import (
     pack_context,
 )
 from topology.types import Budget
+
+logger = logging.getLogger(__name__)
 
 
 def _digest_reads(cap: Capability, snap: Snapshot) -> str:
@@ -45,11 +48,11 @@ class Engine:
         snap = ws.snapshot()
         seen: Set[str] = {snap.digest()}
         
-        print(f"\n🔄 Engine starting with {len(self.capabilities)} capabilities, max_steps={max_steps}")
-        print(f"   Initial state: {list(snap.data.keys())}")
+        logger.debug(f"\n🔄 Engine starting with {len(self.capabilities)} capabilities, max_steps={max_steps}")
+        logger.debug(f"   Initial state: {list(snap.data.keys())}")
         
         for step in range(max_steps):
-            print(f"\n📍 Step {step + 1}/{max_steps}")
+            logger.debug(f"\n📍 Step {step + 1}/{max_steps}")
             
             # Check goal
             scope = getattr(goal, "__ranger_goal_scope__", set())
@@ -57,7 +60,7 @@ class Engine:
             try:
                 goal_met = False if goal_blocked_by_scope else goal(snap)
             except GoalBlocked as blocked:
-                print(f"   Goal blocked: {blocked.reason}")
+                logger.debug(f"   Goal blocked: {blocked.reason}")
                 details = dict(blocked.details) if blocked.details else {}
                 details.setdefault("reason", blocked.reason)
                 return SolveResult(
@@ -69,25 +72,25 @@ class Engine:
             
             if goal_blocked_by_scope:
                 missing_scope = [k for k in scope if not snap.exists(k)]
-                print(f"   Goal scope missing: {missing_scope}")
+                logger.debug(f"   Goal scope missing: {missing_scope}")
             else:
-                print(f"   Goal check: {'✅ MET' if goal_met else '❌ NOT MET'}")
+                logger.debug(f"   Goal check: {'✅ MET' if goal_met else '❌ NOT MET'}")
                 if goal_met:
-                    print(f"🎉 Goal achieved in {step} steps!")
+                    logger.debug(f"🎉 Goal achieved in {step} steps!")
                     return SolveResult(ok=True, final=snap, steps=step)
             
             # Find ready capabilities
             ready = self._find_ready(snap)
-            print(f"   Ready capabilities: {len(ready)}")
+            logger.debug(f"   Ready capabilities: {len(ready)}")
             for cap in ready:
                 reads_status = [f"{k}:{'✓' if snap.exists(k) else '✗'}" for k in (cap.reads or set())]
                 writes_status = [f"{k}:{'✓' if snap.exists(k) else '✗'}" for k in (cap.writes or set())]
-                print(f"     - {cap.id} (reads: {reads_status}, writes: {writes_status})")
+                logger.debug(f"     - {cap.id} (reads: {reads_status}, writes: {writes_status})")
             
             if not ready:
-                print("❌ No ready capabilities found!")
+                logger.debug("❌ No ready capabilities found!")
                 missing = self._missing_for(goal, snap)
-                print(f"   Missing for goal: {missing}")
+                logger.debug(f"   Missing for goal: {missing}")
                 
                 # Debug: show why each capability isn't ready
                 for cap in self.capabilities:
@@ -98,34 +101,34 @@ class Engine:
                     reads_changed = last_digest != read_digest
                     
                     if missing_reads:
-                        print(f"     {cap.id}: missing reads {missing_reads}")
+                        logger.debug(f"     {cap.id}: missing reads {missing_reads}")
                     elif existing_writes and not reads_changed:
-                        print(f"     {cap.id}: writes exist {existing_writes}, reads unchanged")
+                        logger.debug(f"     {cap.id}: writes exist {existing_writes}, reads unchanged")
                     else:
-                        print(f"     {cap.id}: should be ready? (debug needed)")
+                        logger.debug(f"     {cap.id}: should be ready? (debug needed)")
                 
                 return SolveResult(ok=False, final=snap, blocker=WhyNot("no_ready", missing=missing), steps=step)
             
             # Pick compatible batch
             plan = self._pick_compatible(ready)
             if not plan:
-                print("❌ No compatible capabilities found!")
+                logger.debug("❌ No compatible capabilities found!")
                 return SolveResult(ok=False, final=snap, blocker=WhyNot("conflict", details={"ready": [c.id for c in ready]}), steps=step)
             
-            print(f"   Executing batch: {[cap.id for cap in plan]}")
+            logger.debug(f"   Executing batch: {[cap.id for cap in plan]}")
             
             # Apply batch
             old_digest = snap.digest()
             snap = self._apply_batch(ws, plan, snap, goal)
             new_digest = snap.digest()
 
-            print(f"   State after: {list(snap.data.keys())}")
-            print(f"   Digest: {old_digest[:8]} → {new_digest[:8]}")
+            logger.debug(f"   State after: {list(snap.data.keys())}")
+            logger.debug(f"   Digest: {old_digest[:8]} → {new_digest[:8]}")
 
             if new_digest in seen:
                 if self._last_batch_blocked and self._last_blocked_cap:
                     attempts = self._blocked_attempts.get(self._last_blocked_cap, 0)
-                    print(
+                    logger.debug(
                         f"⚠️ Batch blocked by {self._last_blocked_cap} (attempt {attempts}); retrying next cycle"
                     )
                     if attempts >= 3:
@@ -141,11 +144,11 @@ class Engine:
                         )
                     continue
 
-                print("❌ No progress made (digest seen before)")
+                logger.debug("❌ No progress made (digest seen before)")
                 return SolveResult(ok=False, final=snap, blocker=WhyNot("no_progress"), steps=step + 1)
             seen.add(new_digest)
             
-        print(f"❌ Max steps ({max_steps}) reached")
+        logger.debug(f"❌ Max steps ({max_steps}) reached")
         return SolveResult(ok=False, final=snap, blocker=WhyNot("budget", details={"steps": max_steps}), steps=max_steps)
 
     def _find_ready(self, snap: Snapshot) -> List[Capability]:
@@ -195,7 +198,7 @@ class Engine:
 
         for cap in plan:
             rd = _digest_reads(cap, cur)
-            print(f"   🔧 Executing {cap.id}...")
+            logger.debug(f"   🔧 Executing {cap.id}...")
 
             tags = cap.tags or set()
             context_atoms = None
@@ -203,13 +206,13 @@ class Engine:
                 try:
                     context_atoms = self._build_context(cap, cur, goal)
                 except Exception as exc:
-                    print(f"   ⚠️ Context build failed for {cap.id}: {exc}")
+                    logger.debug(f"   ⚠️ Context build failed for {cap.id}: {exc}")
 
             try:
                 writes = cap.runner.run(cap, cur, context=context_atoms) or {}
             except GoalBlocked as blocked:
                 if blocked.reason in soft_block_reasons:
-                    print(f"   ⚠️ {cap.id} blocked by LLM output quality ({blocked.reason}); retrying later")
+                    logger.debug(f"   ⚠️ {cap.id} blocked by LLM output quality ({blocked.reason}); retrying later")
                     self._last_read_digest[cap.id] = rd
                     blocked_cap = cap
                     continue
@@ -217,7 +220,7 @@ class Engine:
 
             # Show tool execution output
             if writes:
-                print(f"   📝 {cap.id} wrote: {list(writes.keys())}")
+                logger.debug(f"   📝 {cap.id} wrote: {list(writes.keys())}")
 
             # Treat empty writes as no-op (enables non-blocking human capabilities)
             if not writes:
@@ -235,7 +238,7 @@ class Engine:
                         raise RuntimeError(f"verify_failed: {cap.id}")
                 except GoalBlocked as blocked:
                     if blocked.reason in soft_block_reasons:
-                        print(f"   ⚠️ {cap.id} post-check blocked ({blocked.reason}); retry scheduled")
+                        logger.debug(f"   ⚠️ {cap.id} post-check blocked ({blocked.reason}); retry scheduled")
                         self._last_read_digest[cap.id] = rd
                         blocked_cap = cap
                         continue

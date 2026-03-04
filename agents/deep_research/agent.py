@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
@@ -28,6 +29,8 @@ MEMORY_DOMAIN = "deepresearch"
 LLM_KEY = "deepresearch.llm"
 DB_FILENAME = "deepresearch.db"
 DEFAULT_BUDGET = Budget(tokens=20000, ms=120000, calls=16)
+
+logger = logging.getLogger(__name__)
 
 
 class DeepResearchAgent(AgentRuntime):
@@ -186,10 +189,10 @@ class DeepResearchAgent(AgentRuntime):
         if not chosen_topic:
             raise ValueError("A research topic must be supplied via constructor or run(topic=...)")
 
-        print("🚀 Starting deep research agent")
-        print(f"📁 Repository: {self.repo_root}")
-        print(f"🧠 Topic: {chosen_topic}")
-        print(f"🧱 Regions: {[region.key for region in list_regions(None)]}")
+        logger.info("Starting deep research agent")
+        logger.debug("Repository: %s", self.repo_root)
+        logger.debug("Topic: %s", chosen_topic)
+        logger.debug("Regions: %s", [region.key for region in list_regions(None)])
 
         result = self.run_agent(
             initial={
@@ -208,7 +211,7 @@ class DeepResearchAgent(AgentRuntime):
             try:
                 self.visualize(target, fmt="png")
             except RuntimeError as exc:
-                print(f"⚠️ Unable to render deep research graph: {exc}")
+                logger.warning("Unable to render deep research graph: %s", exc)
         return result
 
     def visualize(self, output: Path, *, fmt: str = "png") -> Path:

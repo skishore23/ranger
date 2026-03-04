@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
@@ -24,6 +25,8 @@ from .types import TestWriterConfig
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class TestWriterAgent(AgentRuntime):
@@ -160,10 +163,10 @@ class TestWriterAgent(AgentRuntime):
     ) -> SolveResult:
         """Execute the agent until tests are generated or the goal is met."""
 
-        print("🚀 Starting autonomous test writer")
-        print(f"📁 Repository: {self.repo_root}")
-        print(f"⚙️  Config: {self.config}")
-        print(f"🧱 Regions: {[region.key for region in list_regions(None)]}")
+        logger.info("Starting autonomous test writer")
+        logger.debug("Repository: %s", self.repo_root)
+        logger.debug("Config: %s", self.config)
+        logger.debug("Regions: %s", [region.key for region in list_regions(None)])
 
         result = self.run_agent(
             initial={"testwriter.config": self.config.to_state()},
@@ -179,7 +182,7 @@ class TestWriterAgent(AgentRuntime):
             try:
                 self.visualize(target, fmt="png")
             except RuntimeError as exc:
-                print(f"⚠️ Unable to render test writer graph: {exc}")
+                logger.warning("Unable to render test writer graph: %s", exc)
 
         return result
 

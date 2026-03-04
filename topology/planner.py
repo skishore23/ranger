@@ -2,15 +2,44 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from .registry import list_regions
 from .types import Budget, Path, Region
 
 
-MAX_REGIONS: Dict[str, int] = {"memory": 2, "guard": 3, "model": 1, "tool": 1}
-
+DEFAULT_MAX_REGIONS: Dict[str, int] = {"memory": 2, "guard": 3, "model": 1, "tool": 1}
+DEFAULT_SCORE_WEIGHTS: Dict[str, float] = {
+    "latency": 0.75,
+    "tokens": 0.02,
+    "risk": 10.0,
+    "trust": 8.0,
+}
 GUARD_MODE_PRIORITY = {"block": 0, "mask": 1, "allow": 2}
+_REQUIRED_SCORE_KEYS = frozenset(DEFAULT_SCORE_WEIGHTS.keys())
+
+
+@dataclass(frozen=True)
+class PlannerConfig:
+    """Configuration for planner scoring and region limits."""
+
+    max_regions: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_MAX_REGIONS))
+    score_weights: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCORE_WEIGHTS))
+
+    def __post_init__(self) -> None:
+        for kind, value in self.max_regions.items():
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"max_regions[{kind!r}] must be a non-negative integer")
+
+        missing = _REQUIRED_SCORE_KEYS - set(self.score_weights.keys())
+        if missing:
+            raise ValueError(f"score_weights missing required keys: {sorted(missing)}")
+
+        for key, value in self.score_weights.items():
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise ValueError(f"score_weights[{key!r}] must be a finite number")
 
 
 def _unit_tags(unit: Any) -> Set[str]:
@@ -31,24 +60,24 @@ def _cost_profile(region: Region) -> Dict[str, float]:
     }
 
 
-def _region_score(region: Region) -> float:
+def _region_score(region: Region, config: PlannerConfig) -> float:
     profile = _cost_profile(region)
-    # λ1·latency + λ2·token + λ3·risk − λ4·trust
+    w = config.score_weights
     return (
-        profile["latency"] * 0.75
-        + profile["tokens"] * 0.02
-        + profile["risk"] * 10.0
-        - profile["trust"] * 8.0
+        profile["latency"] * float(w["latency"])
+        + profile["tokens"] * float(w["tokens"])
+        + profile["risk"] * float(w["risk"])
+        - profile["trust"] * float(w["trust"])
     )
 
 
-def _guard_sort_key(region: Region) -> tuple:
+def _guard_sort_key(region: Region, config: PlannerConfig) -> tuple:
     mode = getattr(region, "mode", "mask")
     severity = getattr(region, "severity", GUARD_MODE_PRIORITY.get(mode, 1))
     return (
         GUARD_MODE_PRIORITY.get(mode, 1),
         severity,
-        _region_score(region),
+        _region_score(region, config),
     )
 
 
@@ -82,6 +111,7 @@ def _select_regions(
     *,
     goal_domain: Optional[str],
     required_tags: Set[str],
+    config: PlannerConfig,
 ) -> List[Region]:
     regions = [
         region
@@ -89,16 +119,28 @@ def _select_regions(
         if _region_applicable(region, goal_domain=goal_domain, required_tags=required_tags)
     ]
     regions.sort(key=sorter)
-    limit = MAX_REGIONS.get(kind, len(regions))
+    limit = config.max_regions.get(kind, len(regions))
     return regions[:limit]
 
 
-def plan_path(unit: Any, goal: Dict[str, Any], budget: Budget | None = None) -> Path:
+def _goal_domain(goal: Any) -> Optional[str]:
+    if isinstance(goal, dict):
+        val = goal.get("domain")
+        return str(val) if val is not None else None
+    domain = getattr(goal, "domain", None)
+    return str(domain) if domain is not None else None
+
+
+def plan_path(
+    unit: Any,
+    goal: Dict[str, Any],
+    budget: Budget | None = None,
+    config: PlannerConfig | None = None,
+) -> Path:
     """Return a cost-aware path grouping regions by kind."""
 
-    goal_domain: Optional[str] = None
-    if isinstance(goal, dict):
-        goal_domain = goal.get("domain")  # type: ignore[assignment]
+    planner_config = config or PlannerConfig()
+    goal_domain = _goal_domain(goal)
 
     tags = _unit_tags(unit)
     requires_model = "llm" in tags
@@ -106,33 +148,37 @@ def plan_path(unit: Any, goal: Dict[str, Any], budget: Budget | None = None) -> 
 
     memory_regions = _select_regions(
         "memory",
-        _region_score,
+        lambda region: _region_score(region, planner_config),
         goal_domain=goal_domain,
         required_tags=tags,
+        config=planner_config,
     )
     guard_regions = _select_regions(
         "guard",
-        _guard_sort_key,
+        lambda region: _guard_sort_key(region, planner_config),
         goal_domain=goal_domain,
         required_tags=tags,
+        config=planner_config,
     )
 
     model_regions: List[Region] = []
     if requires_model and _budget_allows("model", budget):
         model_regions = _select_regions(
             "model",
-            _region_score,
+            lambda region: _region_score(region, planner_config),
             goal_domain=goal_domain,
             required_tags=tags,
+            config=planner_config,
         )
 
     tool_regions: List[Region] = []
     if requires_tools and _budget_allows("tool", budget):
         tool_regions = _select_regions(
             "tool",
-            _region_score,
+            lambda region: _region_score(region, planner_config),
             goal_domain=goal_domain,
             required_tags=tags,
+            config=planner_config,
         )
 
     coverage = {
@@ -143,7 +189,7 @@ def plan_path(unit: Any, goal: Dict[str, Any], budget: Budget | None = None) -> 
     }
 
     total_cost = sum(
-        _region_score(region)
+        _region_score(region, planner_config)
         for region in (memory_regions + guard_regions + model_regions + tool_regions)
     )
 
@@ -157,4 +203,4 @@ def plan_path(unit: Any, goal: Dict[str, Any], budget: Budget | None = None) -> 
     )
 
 
-__all__ = ["plan_path"]
+__all__ = ["plan_path", "PlannerConfig", "DEFAULT_MAX_REGIONS", "DEFAULT_SCORE_WEIGHTS"]

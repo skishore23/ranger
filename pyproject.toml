@@ -1,10 +1,10 @@
 [project]
 name = "ranger"
 version = "0.1.0"
-description = "Topology-first agent framework with reference implementations"
+description = "Evidence-first execution engine for stateful agent workflows"
 readme = "README.md"
 requires-python = ">=3.11"
-keywords = ["agents", "ai", "workflow", "topology", "automation"]
+keywords = ["agents", "ai", "workflow", "state-machine", "automation"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -22,9 +22,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/example/ranger"
-Documentation = "https://github.com/example/ranger/blob/main/README.md"
-Source = "https://github.com/example/ranger"
+Homepage = "https://github.com/skishore23/ranger"
+Documentation = "https://github.com/skishore23/ranger/blob/main/README.md"
+Source = "https://github.com/skishore23/ranger"
 
 [project.scripts]
 ranger = "ranger.cli:app"
