@@ -244,3 +244,65 @@ class TestBudgetPacking:
         assert window.budget_used.tokens <= budget.tokens
         assert window.budget_used.ms <= budget.ms
         assert window.budget_used.calls <= budget.calls
+
+
+    def test_custom_token_estimator(self):
+        """Test pluggable token estimation."""
+        atoms = [
+            Atom(
+                id="tiny",
+                modality="text",
+                content="tiny",
+                schema="test.schema@v1",
+                facets={"domain": "test", "ts": int(time.time() * 1000)},
+                provenance={},
+                policy={}
+            ),
+            Atom(
+                id="huge",
+                modality="text",
+                content="x" * 1000,
+                schema="test.schema@v1",
+                facets={"domain": "test", "ts": int(time.time() * 1000) + 1, "trust": 0.9},
+                provenance={},
+                policy={}
+            ),
+        ]
+
+        budget = Budget(tokens=50, ms=1000, calls=2)
+        goal = {"name": "test-goal", "domain": "test"}
+
+        # Force the "huge" atom to appear cheap.
+        def estimator(atom: Atom) -> int:
+            return 1 if atom.id == "huge" else 100
+
+        window = pack_context(atoms, budget, goal, token_estimator=estimator)
+
+        assert [atom.id for atom in window.atoms] == ["huge"]
+
+
+    def test_custom_token_estimator_failure_surfaces(self):
+        """Test estimator errors are surfaced clearly."""
+        atoms = [
+            Atom(
+                id="boom",
+                modality="text",
+                content="x",
+                schema="test.schema@v1",
+                facets={"domain": "test", "ts": int(time.time() * 1000)},
+                provenance={},
+                policy={}
+            )
+        ]
+
+        budget = Budget(tokens=10, ms=1000, calls=1)
+        goal = {"name": "test-goal", "domain": "test"}
+
+        def estimator(_atom: Atom) -> int:
+            raise RuntimeError("estimator failed")
+
+        try:
+            pack_context(atoms, budget, goal, token_estimator=estimator)
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert "token_estimator failed" in str(exc)

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 from .types import Atom, Budget, ContextWindow
 
+TokenEstimator = Callable[[Atom], int]
 
-def _approx_tokens(atom: Atom) -> int:
-    """Rudimentary token estimate based on string content length."""
+
+def default_token_estimator(atom: Atom) -> int:
+    """Rudimentary token estimate based on content length and word count."""
 
     content = atom.content
     if isinstance(content, (dict, list, tuple)):
@@ -27,6 +29,14 @@ def _approx_tokens(atom: Atom) -> int:
     word_tokens = len(content.split())
     char_tokens = math.ceil(len(content) / 4)
     return max(1, word_tokens, char_tokens)
+
+
+def _estimate_tokens(atom: Atom, estimator: TokenEstimator) -> int:
+    try:
+        tokens = int(estimator(atom))
+    except Exception as exc:  # noqa: BLE001 - surface invalid custom estimator
+        raise ValueError(f"token_estimator failed for atom {atom.id!r}: {exc}") from exc
+    return max(1, tokens)
 
 
 def _domain_affinity(atom: Atom, goal: Dict[str, object]) -> float:
@@ -67,16 +77,25 @@ def _within_caps(modality_counts: Dict[str, int], caps: Dict[str, int] | None, a
     return modality_counts.get(atom.modality, 0) < cap
 
 
-def _score_atoms(atoms: Sequence[Atom], goal: Dict[str, object]) -> List[Tuple[Atom, float, int]]:
+def _score_atoms(
+    atoms: Sequence[Atom],
+    goal: Dict[str, object],
+    token_estimator: TokenEstimator,
+) -> List[Tuple[Atom, float, int]]:
     reference_ts = max((int(atom.facets.get("ts", 0)) for atom in atoms), default=0)
     scored: List[Tuple[Atom, float, int]] = []
     for atom in atoms:
-        scored.append((atom, _compute_utility(atom, reference_ts, goal), _approx_tokens(atom)))
+        scored.append((atom, _compute_utility(atom, reference_ts, goal), _estimate_tokens(atom, token_estimator)))
     scored.sort(key=lambda item: (item[1], int(item[0].facets.get("ts", 0))), reverse=True)
     return scored
 
 
-def pack_context(atoms: Iterable[Atom], budget: Budget, goal: Dict[str, object]) -> ContextWindow:
+def pack_context(
+    atoms: Iterable[Atom],
+    budget: Budget,
+    goal: Dict[str, object],
+    token_estimator: TokenEstimator | None = None,
+) -> ContextWindow:
     """Return a context window that respects budget and modality limits."""
 
     atom_list = list(atoms)
@@ -84,7 +103,8 @@ def pack_context(atoms: Iterable[Atom], budget: Budget, goal: Dict[str, object])
         empty_budget = Budget(tokens=0, ms=0, calls=0, by_modality=None)
         return ContextWindow(atoms=[], budget_used=empty_budget, regions_used=[], utility_score=0.0)
 
-    scored = _score_atoms(atom_list, goal)
+    estimator = token_estimator or default_token_estimator
+    scored = _score_atoms(atom_list, goal, estimator)
     selected: List[Atom] = []
     modality_counts: Dict[str, int] = {}
     used_tokens = 0
@@ -120,4 +140,4 @@ def pack_context(atoms: Iterable[Atom], budget: Budget, goal: Dict[str, object])
     )
 
 
-__all__ = ["pack_context"]
+__all__ = ["pack_context", "default_token_estimator", "TokenEstimator"]

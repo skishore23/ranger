@@ -5,6 +5,7 @@ implementations backed by remote APIs or topology regions.
 """
 
 from __future__ import annotations
+import logging
 
 import json
 import os
@@ -13,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from topology.registry import get_region
+
+logger = logging.getLogger(__name__)
 
 
 class LLMProvider(Protocol):
@@ -148,7 +151,7 @@ class OpenAIProvider:
             Generated text response
         """
         start_time = time.time()
-        print(f"      🤖 OpenAI {model}")
+        logger.debug(f"      🤖 OpenAI {model}")
         
         # Build messages list
         messages = []
@@ -180,10 +183,10 @@ class OpenAIProvider:
         # Log result
         success = len(content.strip()) > 0
         status = "✅ Got response" if success else "❌ Empty response"
-        print(f"      {status} ({elapsed:.1f}s)")
+        logger.debug(f"      {status} ({elapsed:.1f}s)")
         
         if not success:
-            print(f"      ⚠️  Response: {content[:100]}...")
+            logger.debug(f"      ⚠️  Response: {content[:100]}...")
         
         return content
 
@@ -223,7 +226,7 @@ class ClaudeProvider:
         schema: Optional[Dict[str, Any]] = None
     ) -> str:
         """Generate text using Claude API."""
-        print(f"      🤖 Claude: {model}")
+        logger.debug(f"      🤖 Claude: {model}")
         
         # Build messages
         messages = [{"role": "user", "content": prompt}]
@@ -242,7 +245,7 @@ class ClaudeProvider:
         # Note: Claude doesn't have native JSON mode like OpenAI
         # For structured output, you'd need to add JSON parsing instructions to the prompt
         if schema:
-            print("      ⚠️  Claude: JSON schema enforcement via prompt instructions")
+            logger.debug("      ⚠️  Claude: JSON schema enforcement via prompt instructions")
         
         return content
 

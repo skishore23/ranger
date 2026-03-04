@@ -32,7 +32,7 @@ If you like treating workflows as dataflow—“what do we know now, what can we
 At the core there are just three ideas:
 
 1. **State**  
-   A typed key–value map, for example:
+   A key–value map with optional per-key validation, for example:
 
    ```python
    {
@@ -58,7 +58,7 @@ At the core there are just three ideas:
    - The engine takes a snapshot, finds all ready units, picks a **compatible batch** (no two write the same key), runs them, commits, and repeats.
    - After each batch, a **Goal** predicate checks whether you’re done (or explains why you’re blocked).
 
-Execution topology at a glance:
+Execution loop at a glance:
 
 ```mermaid
 flowchart TD
@@ -74,8 +74,8 @@ flowchart TD
 
 - **Snapshot(State)** freezes the current evidence so readiness decisions are deterministic and replayable.
 - **Find ready capabilities** surfaces every transformation whose declared inputs exist and at least one promised output still needs to be written.
-- **Choose batch with disjoint outputs** enforces conflict-free parallelism; the topology rejects any combination that would contend for the same key.
-- **Execute batch → Merge results** runs the selected morphisms, merges their updates atomically, and records provenance alongside timings.
+- **Choose batch with disjoint outputs** enforces conflict-free parallelism; the engine rejects any combination that would contend for the same key.
+- **Execute batch → Merge results** runs the selected capabilities, merges their updates atomically, and records provenance alongside timings.
 - **Goal satisfied?** evaluates a declarative predicate that either certifies completion or explains which facts are still missing.
 
 No loops or if/else chains live in user code. Control flow **emerges** from how State evolves.
@@ -84,12 +84,12 @@ No loops or if/else chains live in user code. Control flow **emerges** from how 
 
 ## DX Vocabulary
 
-Everything you ship inside Ranger is a typed morphism over `State`. Decorators describe the semantics of that morphism so the topology, planner, and runners can reason about it deterministically.
+Everything you ship inside Ranger is a state transformation over `State`. Decorators describe what each capability reads and writes so the planner and runners can schedule work deterministically.
 
 - **`@step`** – Pure function that reads immutable inputs, emits new facts, and can be retried freely. Validation in `core.validate` makes sure you only reference declared keys.  
 - **`@tool`** – Side-effecting capability (HTTP calls, shell work, filesystem, etc.) executed through the Python runner. Declares exactly which State it mutates so provenance stays intact.  
 - **`@llm`** – Structured LLM call configured through `core.llm.provider`. Prompts, schemas, and retry policies are part of the decorator, keeping generations reproducible.  
-- **`@human`** – Human-in-the-loop checkpoint executed by `core.runners.human_runner`, often used for attestation or approvals.  
+- **`@human`** – Human-in-the-loop checkpoint executed by `core.runners.human_runner`, often used for approvals.  
 - **`@goal`** – Declarative predicate that certifies completion or explains why you are still blocked.  
 - **`Agent`** – Thin runner (`core.engine.Agent`) that keeps applying ready capabilities inside your budget until the goal passes.
 
@@ -99,7 +99,21 @@ All decorators operate on the same immutable snapshot.
 
 - **Contracts** – `core.capability` and `core.plan` track every key that a capability reads or writes, enabling deterministic scheduling and guardrail enforcement.  
 - **Provenance** – `core.provenance` records coverage, timings, and evidence for every capability so you can replay or audit any run later.  
-- **Topology** – Modules under `topology/` (planner, packer, attest) construct the execution graph, ensure disjoint writes, and certify batches before they ever reach a runner.
+- **Execution internals** – Modules under `topology/` currently provide planning, context packing, and guard helpers used by the engine and runtimes.
+
+---
+
+
+## Current Limits (Important)
+
+Ranger intentionally keeps its core structures lightweight today. That makes it flexible, but it also means some README language can be interpreted as stronger guarantees than the code currently enforces:
+
+- State entries store Python `Any` values (`core/workspace.py`) unless you add explicit write specs or validators.
+- Capabilities are declared via read/write key sets and a runner (`core/capability.py`), not a full static type system.
+- Validation is practical but thin (`core/validate.py`): predicate checks, optional JSON Schema, and required-key checks.
+- Context packing in `topology/packer.py` uses heuristic scoring and an approximate token estimate by default (now pluggable via a custom estimator).
+
+If you need strict schema enforcement end-to-end, treat Ranger as an orchestration substrate and add stronger contracts in your own capability layer (or via `WriteSpec` + schema validation).
 
 ---
 
@@ -136,7 +150,7 @@ There is **no orchestration** in this script. The engine:
 2. Sees `"b"` → runs `double` → writes `"c"`.
 3. Goal sees `"c == 4"` → run finishes.
 
-That entire trace is stored in `.ranger/demo.db`: the snapshot deltas, timings, and goal evaluations. You can replay it with `ranger scenario`, diff it against future runs, or visualize it with `ranger visualize` to confirm the topology behaves as intended.
+That entire trace is stored in `.ranger/demo.db`: the snapshot deltas, timings, and goal evaluations. You can replay it with `ranger scenario`, diff it against future runs, or visualize it with `ranger visualize` to confirm the scheduling behaves as intended.
 
 ---
 
@@ -214,7 +228,7 @@ The engine automatically:
 
 You never write that loop explicitly.
 
-Behind the scenes, `topology.planner` keeps recomputing readiness as new evidence lands in `"obs"`, and the attestation layer (`topology.attest`) ensures that the `think`, `plan`, `search`, and `write` capabilities never race over the same keys. The scenario database retains every prompt, response, and decision, so you can audit why a particular answer was produced.
+Behind the scenes, readiness is recomputed whenever new evidence lands in `"obs"`, and batch selection keeps writes disjoint so `think`, `plan`, `search`, and `write` do not race over the same keys. The scenario database retains every prompt, response, and decision, so you can audit why a particular answer was produced.
 
 ---
 
@@ -269,7 +283,7 @@ For larger projects you codify a plan once and let the runtime enforce it with e
   - applies guard regions,
   - exposes a simple `.run(...)` facade for callers.
 
-`agents/common/runtime.AgentRuntime` wires those pieces into budgets, attestation, and visualization hooks so you can focus on the morphology of your domain rather than wiring.
+`agents/common/runtime.AgentRuntime` wires those pieces into budgets and visualization hooks so you can focus on domain behavior rather than plumbing.
 
 Example sketch:
 
@@ -318,7 +332,7 @@ class MyAgent(AgentRuntime):
 
 `AgentRuntime` takes care of registry resets, scenario harness, and visualization so your façade stays small.
 
-Attach regions (see `regions/`) for external memory or LLM providers, and the topology registry (`topology/registry.py`) will make the new capabilities available to the planner automatically.
+Attach regions (see `regions/`) for external memory or LLM providers, and register capabilities so the planner can schedule them automatically.
 
 ---
 
@@ -366,8 +380,7 @@ This repo is organized into a few layers:
 - `ranger/` – CLI entry points plus tooling for tracing, visualization, and scaffolding.  
 - `agents/` – sample agents (test-writer, deep research) that show how to pair plans with runtime facades.  
 - `regions/` – memory and provider bindings (SQLite memory, OpenAI LLM, etc.) that you can register inside runtimes.  
-- `topology/` – attesters, packers, planners, and registries that build the execution graph from declared capabilities.  
-- `studio/` – experimental UI + topology builder tooling.  
+- `topology/` – planning and context-packing utilities used by the runtime (still experimental).  
 - `docs/` – API and agent guides.  
 - `tests/` – unit and integration coverage for engine, runners, and bundled agents.
 
