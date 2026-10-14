@@ -6,7 +6,7 @@ from agents.deep_research.agent import DeepResearchAgent
 from agents.deep_research.types import DeepResearchConfig
 
 
-def _offline_agent(tmp_path, monkeypatch, *, require_review=False):
+def _offline_agent(tmp_path, monkeypatch, *, require_review=False, memory_kwargs=None):
     import json
     from agents.deep_research import capabilities
     from core.llm.provider import register_llm_profile
@@ -14,7 +14,7 @@ def _offline_agent(tmp_path, monkeypatch, *, require_review=False):
     config = DeepResearchConfig(desired_length_pages=1, min_citations=1,
                                 require_human_feedback=require_review,
                                 output_path=tmp_path / 'report.md')
-    agent = DeepResearchAgent(repo_root=tmp_path, topic="Quantum computing impact", config=config)
+    agent = DeepResearchAgent(repo_root=tmp_path, topic="Quantum computing impact", config=config, memory_kwargs=memory_kwargs)
     class Provider:
         def generate(self, **request):
             schema = request.get('schema') or {}

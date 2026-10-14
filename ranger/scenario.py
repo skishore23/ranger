@@ -228,10 +228,41 @@ class ScenarioHarness:
         ok = bool(coverage and coverage.passed and execution_ok)
         if self.execution is not None:
             ok = self.execution['status'] == 'succeeded'
-            if execution_atom is not None or coverage_target is not None:
+            target_evidence = self._final_target_evidence()
+            if target_evidence is not None:
+                selected, invalid = target_evidence
+                metrics = [self._extract_coverage(coverage_target, atom) for atom in selected]
+                state = self.execution['state']
+                for atom, metric in zip(selected, metrics):
+                    target = atom.content['identity']['target']
+                    metadata = state['tests.progress'][target]
+                    recorded_coverage = metadata.get('coverage') or {}
+                    if (atom.content.get('status') != 'passed' or atom.content.get('returncode') != 0
+                            or metadata.get('status') != 'passed' or not metadata.get('coverage_met')
+                            or recorded_coverage.get('identity') != atom.content['identity']
+                            or recorded_coverage.get('artifacts') != atom.content['artifacts']
+                            or not recorded_coverage.get('available')
+                            or recorded_coverage.get('total') != metric.actual):
+                        invalid.append(target)
+                # Preserve the scalar API: actual is the minimum across final targets,
+                # and missing files are the union. Historical attempts do not count.
+                coverage = None
+                if metrics:
+                    weakest = min(metrics, key=lambda metric: metric.actual)
+                    coverage = CoverageMetrics(
+                        actual=weakest.actual, target=weakest.target,
+                        passed=not invalid and all(metric.passed for metric in metrics),
+                        assumed=any(metric.assumed for metric in metrics),
+                        missing_files=sorted({path for metric in metrics for path in metric.missing_files}),
+                        source_atom=weakest.source_atom,
+                    )
+                ok = ok and not invalid and bool(coverage and coverage.passed)
+                if invalid:
+                    blocked = GoalBlockedSimulation(reason='execution_failed', details={'targets': sorted(set(invalid))})
+            elif execution_atom is not None or coverage_target is not None:
                 ok = ok and bool(coverage and coverage.passed and execution_ok)
 
-        if coverage and not coverage.passed:
+        if coverage and not coverage.passed and blocked is None:
             blocked = GoalBlockedSimulation(
                 reason="coverage_shortfall",
                 details={
@@ -284,8 +315,32 @@ class ScenarioHarness:
             lines.append(f"{ts_iso} {bar:<{width}} {atom.label}")
         return lines
 
-    def _extract_coverage(self, coverage_target: Optional[float]) -> Optional[CoverageMetrics]:
-        execution_atom = self._latest_execution_atom()
+    def _final_target_evidence(self):
+        """Select completed evidence matching each required target's final attempt."""
+        state = self.execution['state']
+        if 'tests.todo' not in state and 'testwriter.config' not in state:
+            return None
+        todo, progress = state.get('tests.todo'), state.get('tests.progress', {})
+        if not isinstance(todo, list) or not todo or not isinstance(progress, dict):
+            return [], ['missing_target_state']
+        selected, invalid = [], []
+        for entry in todo:
+            target = entry.get('path')
+            metadata = progress.get(target) or {}
+            identity = {'target': target, 'attempt': metadata.get('attempts')}
+            atom = next((atom for atom in reversed(self._atoms)
+                         if atom.schema == 'testwriter.execution@v1' and isinstance(atom.content, dict)
+                         and atom.content.get('identity') == identity), None)
+            artifacts = metadata.get('artifacts')
+            if (not target or metadata.get('identity') != identity or not artifacts
+                    or atom is None or atom.content.get('artifacts') != artifacts):
+                invalid.append(target or 'missing_target')
+                continue
+            selected.append(atom)
+        return selected, invalid
+
+    def _extract_coverage(self, coverage_target: Optional[float], execution_atom=None) -> Optional[CoverageMetrics]:
+        execution_atom = execution_atom or self._latest_execution_atom()
         if not execution_atom:
             return None
 
@@ -320,7 +375,10 @@ class ScenarioHarness:
 
         target = coverage_target
         if target is None:
-            target = self._infer_target(actual)
+            if self.execution is not None and 'testwriter.config' in self.execution['state']:
+                target = self.execution['state']['testwriter.config'].get('coverage_target')
+            if target is None:
+                target = self._infer_target(actual)
         if target is None:
             target = 0.0
 

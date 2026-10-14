@@ -134,7 +134,7 @@ class TestWriterAgent(AgentRuntime):
             ),
             action(
                 capabilities.detect_terminal_state,
-                requires_initial={"testwriter.config"},
+                requires_initial=base_initial,
             ),
         ]
 

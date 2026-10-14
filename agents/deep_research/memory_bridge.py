@@ -7,11 +7,10 @@ import json
 import time
 from typing import Any, Dict, Iterable, List
 
-from topology.registry import get_region
+from agents.common.memory import writer_memory
 from topology.types import Atom
 
 MEMORY_KEY = "deepresearch.memory"
-_DOMAIN = "deepresearch"
 
 
 def _now() -> int:
@@ -24,7 +23,7 @@ def _hash(payload: Any) -> str:
 
 
 def store_request(request: Dict[str, Any]) -> None:
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "deepresearch")
     if region is None:
         return
     atom = Atom(
@@ -32,7 +31,7 @@ def store_request(request: Dict[str, Any]) -> None:
         modality="json",
         content=request,
         schema="deepresearch.request@v1",
-        facets={"domain": _DOMAIN, "ts": _now()},
+        facets={"domain": domain, "ts": _now()},
         provenance={"parents": []},
         policy={"retention_days": 7},
     )
@@ -40,7 +39,7 @@ def store_request(request: Dict[str, Any]) -> None:
 
 
 def store_plan(plan: Dict[str, Any]) -> None:
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "deepresearch")
     if region is None:
         return
     atom = Atom(
@@ -48,7 +47,7 @@ def store_plan(plan: Dict[str, Any]) -> None:
         modality="json",
         content=plan,
         schema="deepresearch.plan@v1",
-        facets={"domain": _DOMAIN, "ts": _now()},
+        facets={"domain": domain, "ts": _now()},
         provenance={"parents": []},
         policy={"retention_days": 7},
     )
@@ -56,7 +55,7 @@ def store_plan(plan: Dict[str, Any]) -> None:
 
 
 def store_sources(sources: Iterable[Dict[str, Any]]) -> None:
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "deepresearch")
     if region is None:
         return
 
@@ -69,7 +68,7 @@ def store_sources(sources: Iterable[Dict[str, Any]]) -> None:
                 content=src,
                 schema="deepresearch.source@v1",
                 facets={
-                    "domain": _DOMAIN,
+                    "domain": domain,
                     "ts": _now(),
                     "url": src.get("url"),
                     "query": src.get("query"),
@@ -83,7 +82,7 @@ def store_sources(sources: Iterable[Dict[str, Any]]) -> None:
 
 
 def store_notes(notes: Dict[str, Any]) -> None:
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "deepresearch")
     if region is None:
         return
     atom = Atom(
@@ -91,7 +90,7 @@ def store_notes(notes: Dict[str, Any]) -> None:
         modality="json",
         content=notes,
         schema="deepresearch.notes@v1",
-        facets={"domain": _DOMAIN, "ts": _now()},
+        facets={"domain": domain, "ts": _now()},
         provenance={"parents": []},
         policy={"retention_days": 14},
     )
@@ -99,7 +98,7 @@ def store_notes(notes: Dict[str, Any]) -> None:
 
 
 def store_report(report: str, citations: List[Dict[str, Any]]) -> None:
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "deepresearch")
     if region is None:
         return
     atom = Atom(
@@ -107,7 +106,7 @@ def store_report(report: str, citations: List[Dict[str, Any]]) -> None:
         modality="text",
         content=report,
         schema="deepresearch.report@v1",
-        facets={"domain": _DOMAIN, "ts": _now()},
+        facets={"domain": domain, "ts": _now()},
         provenance={"parents": []},
         policy={"retention_days": 30},
     )
@@ -116,7 +115,7 @@ def store_report(report: str, citations: List[Dict[str, Any]]) -> None:
         modality="json",
         content=citations,
         schema="deepresearch.citations@v1",
-        facets={"domain": _DOMAIN, "ts": _now()},
+        facets={"domain": domain, "ts": _now()},
         provenance={"parents": []},
         policy={"retention_days": 30},
     )

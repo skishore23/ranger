@@ -8,7 +8,7 @@ import hashlib
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
-from core.execution import generate_with_policy
+from core.execution import generate_with_policy, selected_snapshot
 from core.errors import GoalBlocked
 from core.llm.provider import RegionBackedProvider, resolve_llm_profile
 from core.sdk import goal, human, step, tool
@@ -505,6 +505,12 @@ def finalize_report(ws: Snapshot) -> Dict[str, Any]:
 
 @tool(inputs=["research.report", "research.citations", "deepresearch.config"], outputs=["research.output_path"])
 def persist_report(ws: Snapshot) -> Dict[str, Any]:
+    original = selected_snapshot()
+    if original is not None and (
+        (ws.get("deepresearch.config") or {}).get("output_path")
+        != (original.get("deepresearch.config") or {}).get("output_path")
+    ):
+        raise GoalBlocked("policy_blocked", details={"error": "guard changed report output path"})
     config = _config_from_snapshot(ws)
     output_path = config.output_path
     if not output_path:

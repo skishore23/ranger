@@ -67,6 +67,23 @@ _LIMITS: ContextVar[tuple] = ContextVar('ranger_generation_limits', default=())
 _CURRENT: ContextVar[ExecutionState | None] = ContextVar('ranger_execution', default=None)
 
 
+_SELECTED_SNAPSHOT: ContextVar[Any] = ContextVar('ranger_selected_snapshot', default=None)
+
+
+def selected_snapshot():
+    """Original selected inputs, for actions validating unchanged routing values."""
+    return _SELECTED_SNAPSHOT.get()
+
+
+@contextmanager
+def selected_snapshot_scope(snapshot):
+    token = _SELECTED_SNAPSHOT.set(snapshot)
+    try:
+        yield
+    finally:
+        _SELECTED_SNAPSHOT.reset(token)
+
+
 def current_execution() -> ExecutionState | None:
     return _CURRENT.get()
 

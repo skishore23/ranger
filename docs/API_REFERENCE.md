@@ -2,7 +2,7 @@
 
 ## State and capabilities
 
-`Snapshot` supports `snapshot[key]`, `key in snapshot`, `get(key, default=None)`, `value(key)`, `exists(key)` and `data`. Values are defensive copies, including nested lists/dicts. `Workspace.cas_commit(writes, write_specs=..., provenance_id=...)` stages and validates the complete merged write set before publishing it. `WriteSpec` controls merge mode, schema and validators; this is runtime validation rather than static typing.
+`Snapshot` supports `snapshot[key]`, `key in snapshot`, `get(key, default=None)`, `value(key)`, `exists(key)` and `data`. Values are defensive copies, including nested lists/dicts. `Workspace.cas_commit(writes, write_specs=..., provenance_id=...)` stages and validates the complete merged write set before publishing it. `WriteSpec` has `merge_mode`, `validator` and reserved `reducer` fields. Use `@llm(schema=...)` or an explicit validator for schema checks; validation occurs at runtime.
 
 Import decorators from `core.sdk`:
 

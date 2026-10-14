@@ -11,7 +11,7 @@ from .trace import Recorder, recording, emit, validate, values as snapshot_value
 from .capability import Capability
 from .errors import GoalBlocked, SolveResult, WhyNot
 from .provenance import digest_writes
-from .execution import ExecutionState, execution_scope, current_execution, guard_atoms, guard_value
+from .execution import ExecutionState, execution_scope, current_execution, guard_atoms, guard_value, selected_snapshot_scope
 from topology import plan_path, summarize_regions, reconcile_overlaps, pack_context
 from topology.types import Budget
 
@@ -172,7 +172,8 @@ class Engine:
                     if state is not None:
                         state.check_time()
                     try:
-                        writes = cap.runner.run(cap, selected, context=context) or {}
+                        with selected_snapshot_scope(snap):
+                            writes = cap.runner.run(cap, selected, context=context) or {}
                     finally:
                         if state is not None:
                             state.check_time()

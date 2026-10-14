@@ -7,7 +7,7 @@ import json
 import time
 from typing import Dict, Iterable, List
 
-from topology.registry import get_region
+from agents.common.memory import writer_memory
 from topology.types import Atom
 
 MEMORY_KEY = "testwriter.memory"
@@ -15,7 +15,7 @@ MEMORY_KEY = "testwriter.memory"
 
 def store_module_indexes(modules: Iterable[Dict[str, object]]) -> None:
     """Persist module analysis results into the topology memory region."""
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "testwriter")
     if region is None:
         return
 
@@ -31,7 +31,7 @@ def store_module_indexes(modules: Iterable[Dict[str, object]]) -> None:
                 content=payload,
                 schema="testwriter.module@v1",
                 facets={
-                    "domain": "testwriter",
+                    "domain": domain,
                     "source": "analysis",
                     "path": module_path,
                     "ts": int(time.time() * 1000),
@@ -47,7 +47,7 @@ def store_module_indexes(modules: Iterable[Dict[str, object]]) -> None:
 
 def store_generated_tests(tests: Iterable[Dict[str, str]]) -> None:
     """Persist generated tests into the topology memory region."""
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "testwriter")
     if region is None:
         return
 
@@ -61,7 +61,7 @@ def store_generated_tests(tests: Iterable[Dict[str, str]]) -> None:
                 content=test.get("content", ""),
                 schema="testwriter.test@v1",
                 facets={
-                    "domain": "testwriter",
+                    "domain": domain,
                     "source": "generation",
                     "path": test.get("path"),
                     "ts": int(time.time() * 1000),
@@ -77,7 +77,7 @@ def store_generated_tests(tests: Iterable[Dict[str, str]]) -> None:
 
 def store_execution_result(result: Dict[str, object]) -> None:
     """Persist execution results for guard/context usage."""
-    region = get_region(MEMORY_KEY)
+    region, domain = writer_memory(MEMORY_KEY, "testwriter")
     if region is None:
         return
 
@@ -88,7 +88,7 @@ def store_execution_result(result: Dict[str, object]) -> None:
         content=result,
         schema="testwriter.execution@v1",
         facets={
-            "domain": "testwriter",
+            "domain": domain,
             "source": "execution",
             "status": result.get("status"),
             "ts": int(time.time() * 1000),

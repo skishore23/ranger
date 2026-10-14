@@ -70,12 +70,12 @@ class SuiteProvider:
         return json.dumps({'tests': [{'path': f'tests/test_{module}.py', 'content': f'from pkg.{module} import value\n\ndef test_value():\n    assert value() == {1 if passing else 2}\n'}]})
 
 
-def writer(tmp_path, provider, *, targets=1, attempts=2, coverage=.5):
+def writer(tmp_path, provider, *, targets=1, attempts=2, coverage=.5, memory_kwargs=None):
     (tmp_path / 'pkg').mkdir()
     (tmp_path / 'pkg/__init__.py').write_text('')
     for i in range(1, targets + 1):
         (tmp_path / f'pkg/mod{i}.py').write_text('def value():\n    return 1\n')
-    agent = TestWriterAgent(repo_root=tmp_path, config=WriterConfig(include=['pkg/*.py'], max_attempts_per_target=attempts, coverage_target=coverage))
+    agent = TestWriterAgent(repo_root=tmp_path, config=WriterConfig(include=['pkg/*.py'], max_attempts_per_target=attempts, coverage_target=coverage), memory_kwargs=memory_kwargs)
     register_llm_profile('testwriter.generation', provider=provider, defaults={'model': 'stub', 'max_tokens': 1600})
     return agent
 
@@ -333,7 +333,7 @@ def test_reference_side_effects_cross_registered_guard_boundary(tmp_path, monkey
         target = tmp_path / 'tests/test_private.py'
         target.write_text('original')
         entry = {'path': 'pkg/mod1.py', 'attempt': 1}
-        initial = {'repo.root': str(tmp_path), 'tests.active.entry': entry, 'tests.write.requests': [{'identity': tw._identity(entry), 'path': 'tests/test_private.py', 'content': '# private@example.org'}]}
+        initial = {'repo.root': str(tmp_path), 'tests.progress': {}, 'tests.active.entry': entry, 'tests.write.requests': [{'identity': tw._identity(entry), 'path': 'tests/test_private.py', 'content': '# private@example.org'}]}
         result = Agent([tw.write_test_files]).run(initial=initial, goal=done)
         assert target.read_text() == 'original'
     else:

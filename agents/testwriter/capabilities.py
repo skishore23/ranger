@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.errors import GoalBlocked
+from core.execution import selected_snapshot
 from core.sdk import goal, step, tool, llm
 from core.workspace import Snapshot
 
@@ -80,6 +82,49 @@ def _safe_test_path(root: Path, path: str) -> Path:
     if not target.is_relative_to(resolved_tests) or target == resolved_tests:
         raise GoalBlocked("unsafe_test_path", details={"path": str(path)})
     return target
+
+
+def _file_selectors(ws: Snapshot, *, execution: bool):
+    entry = ws.get("tests.active.entry") or {}
+    selectors = {
+        "root": ws.get("repo.root"),
+        "identity": _identity(entry),
+        "module": entry.get("module"),
+        "requests": [request.get("path") for request in (ws.get("tests.write.requests") or [])],
+    }
+    if execution:
+        written = ws.get("tests.write.result") or {}
+        selectors.update(written=written.get("written"), skipped=written.get("skipped"),
+                         artifacts=written.get("artifacts"),
+                         pytest_args=(ws.get("testwriter.config") or {}).get("pytest_args"))
+    else:
+        selectors["owners"] = {owner: metadata.get("artifacts")
+                               for owner, metadata in ws.get("tests.progress", {}).items()}
+    return selectors
+
+
+def _check_file_selectors(ws: Snapshot, *, execution: bool = False) -> None:
+    original = selected_snapshot()
+    if original is not None and _file_selectors(ws, execution=execution) != _file_selectors(original, execution=execution):
+        raise GoalBlocked("policy_blocked", details={"error": "guard changed test file routing"})
+
+
+def _artifacts(root: Path, paths) -> List[Dict[str, str]]:
+    """Canonical destinations and exact bytes certified by a pytest execution."""
+    return sorted(
+        ({"path": str(target.relative_to(root)), "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
+         for target in {_safe_test_path(root, path) for path in paths}),
+        key=lambda artifact: artifact["path"],
+    )
+
+
+def _artifacts_match(root: Path, artifacts) -> bool:
+    if not isinstance(artifacts, list) or not artifacts:
+        return False
+    try:
+        return artifacts == _artifacts(root, [artifact["path"] for artifact in artifacts])
+    except (OSError, KeyError, TypeError, GoalBlocked):
+        return False
 
 
 def _read_optional(path: Path) -> Optional[str]:
@@ -818,8 +863,9 @@ def prepare_write_requests(ws: Snapshot) -> Dict[str, Any]:
     return {"tests.write.requests": requests}
 
 
-@tool(inputs=["repo.root", "tests.write.requests", "tests.active.entry"], outputs=["tests.write.result"])
+@tool(inputs=["repo.root", "tests.write.requests", "tests.active.entry", "tests.progress"], outputs=["tests.write.result"])
 def write_test_files(ws: Snapshot) -> Dict[str, Any]:
+    _check_file_selectors(ws)
     root = Path(ws.get("repo.root", ".")).resolve()
     requests = ws.get("tests.write.requests", []) or []
 
@@ -828,13 +874,19 @@ def write_test_files(ws: Snapshot) -> Dict[str, Any]:
         return {}
     # Validate every request before creating directories or modifying files.
     targets = []
+    owned = {
+        _safe_test_path(root, artifact["path"])
+        for owner, metadata in ws.get("tests.progress", {}).items()
+        if owner != (entry or {}).get("path")
+        for artifact in metadata.get("artifacts", [])
+    }
     for req in requests:
         target = _safe_test_path(root, req.get("path", ""))
         invalid_destination = target.exists() and not target.is_file()
         invalid_ancestor = any(parent.exists() and not parent.is_dir() for parent in target.parents)
         batch_conflict = any(target == previous or target in previous.parents or previous in target.parents
                              for previous in targets)
-        if not isinstance(req.get("content"), str) or invalid_destination or invalid_ancestor or batch_conflict:
+        if not isinstance(req.get("content"), str) or invalid_destination or invalid_ancestor or batch_conflict or target in owned:
             raise GoalBlocked("invalid_test_write", details={"path": req.get("path")})
         targets.append(target)
 
@@ -856,7 +908,8 @@ def write_test_files(ws: Snapshot) -> Dict[str, Any]:
         target_path.write_text(content, encoding="utf-8")
         written.append(rel_path)
 
-    result = {"written": written, "skipped": skipped, "identity": _identity(entry)}
+    result = {"written": written, "skipped": skipped, "identity": _identity(entry),
+              "artifacts": _artifacts(root, written + skipped)}
     _log(_config_from_snapshot(ws), f"💾 Wrote {len(written)} file(s), skipped {len(skipped)} unchanged")
     return {"tests.write.result": result}
 
@@ -866,6 +919,7 @@ def write_test_files(ws: Snapshot) -> Dict[str, Any]:
     outputs=["tests.run.result"],
 )
 def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
+    _check_file_selectors(ws, execution=True)
     config = _config_from_snapshot(ws)
     write_result = ws.get("tests.write.result", {})
     requests = ws.get("tests.write.requests", []) or []
@@ -887,6 +941,16 @@ def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
     root = Path(ws.get("repo.root", ".")).resolve()
     for path in candidate_paths:
         _safe_test_path(root, path)
+    artifacts = write_result.get("artifacts")
+    if not _artifacts_match(root, artifacts) or artifacts != _artifacts(root, candidate_paths):
+        raise GoalBlocked("test_artifact_changed", details={"identity": _identity(entry)})
+    expected = sorted(
+        ({"path": str(_safe_test_path(root, req["path"]).relative_to(root)),
+          "sha256": hashlib.sha256(req["content"].encode("utf-8")).hexdigest()} for req in requests),
+        key=lambda artifact: artifact["path"],
+    )
+    if artifacts != expected:
+        raise GoalBlocked("test_artifact_changed", details={"identity": _identity(entry)})
     coverage_path = root / COVERAGE_PATH
     if coverage_path.exists():
         coverage_path.unlink()
@@ -933,6 +997,8 @@ def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
         except json.JSONDecodeError as exc:
             _log(config, f"⚠️ Unable to parse coverage report: {exc}")
 
+    if not _artifacts_match(root, artifacts):
+        raise GoalBlocked("test_artifact_changed", details={"identity": _identity(entry)})
     status = "passed" if completed.returncode == 0 else "failed"
     result = {
         "identity": _identity(entry),
@@ -941,6 +1007,7 @@ def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "paths": sorted(candidate_paths),
+        "artifacts": artifacts,
         "coverage": coverage_data,
         "coverage_file": str(coverage_path) if coverage_path.exists() else None,
     }
@@ -959,7 +1026,8 @@ def analyze_coverage(ws: Snapshot) -> Dict[str, Any]:
 
     if not coverage:
         report = {"total": 0.0, "files": {}, "target": config.coverage_target,
-                  "available": False, "identity": run_result.get("identity")}
+                  "available": False, "identity": run_result.get("identity"),
+                  "artifacts": run_result.get("artifacts")}
         return {"coverage.report": report, "coverage.goal.met": config.coverage_target <= 0.0}
 
     totals = coverage.get("totals", {})
@@ -967,6 +1035,7 @@ def analyze_coverage(ws: Snapshot) -> Dict[str, Any]:
     report = {
         "identity": run_result.get("identity"),
         "available": True,
+        "artifacts": run_result.get("artifacts"),
         "total": total_coverage,
         "target": config.coverage_target,
         "files": coverage.get("files", {}),
@@ -1023,7 +1092,8 @@ def update_progress_trackers(ws: Snapshot) -> Dict[str, Any]:
     entry = ws.get("tests.active.entry")
     run = ws.get("tests.run.result") or {}
     coverage = ws.get("coverage.report") or {}
-    if not _matches(run, entry) or not _matches(coverage, entry):
+    if (not _matches(run, entry) or not _matches(coverage, entry)
+            or not run.get("artifacts") or coverage.get("artifacts") != run["artifacts"]):
         return {}
     progress = ws.get("tests.progress", {})
     path = entry["path"]
@@ -1038,7 +1108,7 @@ def update_progress_trackers(ws: Snapshot) -> Dict[str, Any]:
                      "stderr": run.get("stderr", ""), "coverage": coverage}]
     progress[path] = {"identity": run["identity"], "attempts": entry["attempt"],
                       "status": run.get("status", "error"), "coverage_met": coverage_met,
-                      "coverage": coverage, "test_paths": run.get("paths", []), "failures": failures}
+                      "coverage": coverage, "test_paths": run.get("paths", []), "artifacts": run["artifacts"], "failures": failures}
     completed = sorted(path for path, meta in progress.items()
                        if meta["status"] == "passed" and meta["coverage_met"])
     failed = sorted(path for path, meta in progress.items()
@@ -1056,7 +1126,7 @@ def update_progress_trackers(ws: Snapshot) -> Dict[str, Any]:
 
 
 @step(
-    inputs=["tests.todo", "tests.progress", "testwriter.config", "coverage.goal.met"],
+    inputs=["repo.root", "tests.todo", "tests.progress", "testwriter.config", "coverage.goal.met"],
     outputs=["tests.terminal"],
 )
 def detect_terminal_state(ws: Snapshot) -> Dict[str, Any]:
@@ -1070,7 +1140,8 @@ def detect_terminal_state(ws: Snapshot) -> Dict[str, Any]:
         path = entry["path"]
         metadata = progress.get(path, {})
         identity = metadata.get("identity") or {}
-        valid = identity.get("target") == path and identity.get("attempt") == metadata.get("attempts")
+        valid = (identity.get("target") == path and identity.get("attempt") == metadata.get("attempts")
+                 and _artifacts_match(Path(ws.get("repo.root", ".")).resolve(), metadata.get("artifacts")))
         if valid and metadata.get("status") == "passed" and metadata.get("coverage_met"):
             completed.append(path)
         elif metadata.get("attempts", 0) < config.max_attempts_per_target:

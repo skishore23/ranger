@@ -120,7 +120,13 @@ class GuardPII(BaseGuardRegion):
                     if isinstance(value, str):
                         return re.sub(pattern, replacement, value)
                     if isinstance(value, dict):
-                        return {redact(k): redact(v) for k, v in value.items()}
+                        repaired = {}
+                        for key, item in value.items():
+                            repaired_key = redact(key)
+                            if repaired_key in repaired:
+                                raise ValueError("PII redaction would merge distinct mapping keys")
+                            repaired[repaired_key] = redact(item)
+                        return repaired
                     if isinstance(value, list):
                         return [redact(v) for v in value]
                     if isinstance(value, tuple):

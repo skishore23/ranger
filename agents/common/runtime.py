@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
+from agents.common.memory import memory_scope
 from boot import setup_memory
 from core.errors import SolveResult
 from core.sdk import Agent
@@ -124,7 +125,8 @@ class AgentRuntime:
             state = dict(initial)
         else:
             state = self.build_initial_state(initial)
-        return self._agent.run(initial=state, goal=goal, max_steps=max_steps)
+        with memory_scope(self.memory_key, self.memory_domain):
+            return self._agent.run(initial=state, goal=goal, max_steps=max_steps)
 
     def _resolve_visualize_target(
         self,
