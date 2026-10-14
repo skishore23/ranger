@@ -180,6 +180,10 @@ Trace state must use JSON `null`/`None`, booleans, integers, finite floats, stri
 
 `ranger trace` inspects memory atoms, which are separate from SDK execution events. For example, after running a reference agent: `ranger trace .ranger/testwriter.db --domain testwriter --limit 20`.
 
+## Shared field contracts
+
+Pass `field_contracts={"field": FieldContract(schema=..., allowed_writers=["capability-id"], allow_initial=True)}` to `Agent` to validate both initial values and final merged updates against shared JSON Schemas. A supplied map defines the complete allowed field set; writer IDs control updates, while `allow_initial` separately controls seeds. Omit the map to retain existing behavior. This complements strict read contracts and evidence binding. See the [executable example and field contract](docs/FIELD_CONTRACTS.md).
+
 ## Reusable validation evidence
 
 `core.evidence` supplies `capture_binding`, `bind_evidence`, `check_binding` and `check_evidence`. Capture declared JSON inputs/file bytes before validation, attach the actual Boolean outcome, and require a matching current binding at acceptance. Checks return `GoalCheck` with unmet requirements. Missing/malformed evidence, changed inputs, changed file inventory or context, and a different validator cannot approve a candidate. The application supplies the current dependency list independently. See the [complete example and binding contract](docs/EVIDENCE_BINDING.md).

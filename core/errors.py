@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Set, Dict, Any
 from .workspace import Snapshot
-from .contracts import ContractViolation
+from .contracts import ContractViolation, FieldContractViolation
 
 
 @dataclass(frozen=True)

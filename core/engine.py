@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .workspace import Workspace, Snapshot
 from .trace import Recorder, recording, emit, validate, values as snapshot_values
 from .capability import Capability
+from .fields import _FieldContracts
 from .errors import GoalBlocked, GoalCheck, SolveResult, WhyNot, ContractViolation
 from .provenance import digest_writes
 from .execution import ExecutionState, execution_scope, current_execution, guard_atoms, guard_value, selected_snapshot_scope
@@ -26,13 +27,14 @@ class Engine:
     """Serial execution of stable batches with no declared read/write hazards."""
     def __init__(self, capabilities: List[Capability], budget: Optional[Budget] = None, *,
                  trace_path=".ranger/runs.db", trace: bool = False,
-                 strict_contracts: bool = False):
+                 strict_contracts: bool = False, field_contracts=None):
         self.trace_domain = None
         self.trace_path = trace_path
         self.trace = trace
         if type(strict_contracts) is not bool:
             raise TypeError('strict_contracts must be a bool')
         self.strict_contracts = strict_contracts
+        self._fields = _FieldContracts(field_contracts) if field_contracts is not None else None
         self.capabilities = list(capabilities)
         self._prepare_capabilities()
         # Enough for multi-target reference workflows; limits remain finite.
@@ -58,6 +60,10 @@ class Engine:
                                      tags=frozenset(cap.tags) if cap.tags is not None else None,
                                      write_specs=dict(cap.write_specs) if cap.write_specs is not None else None)
                              for cap in self.capabilities]
+        if self._fields is not None:
+            for cap in self.capabilities:
+                self._fields.check_reads(cap.reads, cap.id)
+                self._fields.authorize(sorted(cap.writes), cap.id)
 
     def _reset_run(self):
         self._last_read_digest: Dict[str, str] = {}
@@ -72,7 +78,7 @@ class Engine:
               max_steps: int = 60) -> SolveResult:
         self._prepare_capabilities()
         self._reset_run()
-        ws = Workspace(initial)
+        ws = Workspace(initial, field_contracts=self._fields.export() if self._fields is not None else None)
         state = ExecutionState(replace(self.budget))
         recorder = Recorder(self.trace_path, snapshot_values(ws.snapshot()), self.trace_domain) if self.trace else None
         try:
@@ -241,6 +247,8 @@ class Engine:
                         values = guard_value({k: entry.value for k, entry in entries.items()})
                         if set(values) != set(entries):
                             raise GoalBlocked('policy_blocked', {'error': 'guard changed workspace keys'})
+                        if self._fields is not None:
+                            self._fields.validate_values(values, cap.id)
                         selected = Snapshot({k: replace(entry, value=values[k]) for k, entry in entries.items()})
                     if state is not None:
                         state.check_time()
@@ -282,9 +290,12 @@ class Engine:
                          duration_ms=(time.monotonic() - started) * 1000, reason=blocked.reason)
                     continue
                 if writes:
-                    validate(writes)
+                    if self._fields is None:
+                        validate(writes)
+                    else:
+                        self._fields.validate_json(writes, cap.id)
                     prov_id = f'{cap.id}:{rd}:{digest_writes(writes)}'
-                    ws.cas_commit(writes, write_specs=cap.write_specs or {}, provenance_id=prov_id,
+                    ws.cas_commit(writes, write_specs=cap.write_specs or {}, provenance_id=prov_id, writer=cap.id,
                                   before_publish=state.check_time if state is not None else None)
                     after = snapshot_values(ws.snapshot())
                     emit('commit', capability=cap.id, writes={k: after[k] for k in writes}, state=after)

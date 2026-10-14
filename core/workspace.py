@@ -7,6 +7,7 @@ import json
 import hashlib
 from .merge import WriteSpec, validate_value, MergeMode, merge_json_values
 from .contracts import ContractViolation
+from .fields import _FieldContracts
 
 FieldKey = str
 
@@ -103,8 +104,15 @@ class _ContractSnapshot(Snapshot):
 
 
 class Workspace:
-    def __init__(self, initial: Optional[Dict[str, Any]] = None):
-        self._store = {k: Entry(deepcopy(v), 1, 'init') for k, v in (initial or {}).items()}
+    def __init__(self, initial: Optional[Dict[str, Any]] = None, *, field_contracts=None):
+        self._fields = _FieldContracts(field_contracts) if field_contracts is not None else None
+        if self._fields is not None and initial is not None and not isinstance(initial, MappingABC):
+            raise TypeError('Initial state must be a mapping')
+        values = deepcopy(initial or {})
+        if self._fields is not None:
+            self._fields.authorize(values, None, initial=True)
+            self._fields.validate_values(values, None)
+        self._store = {k: Entry(v, 1, 'init') for k, v in values.items()}
 
     def snapshot(self) -> Snapshot:
         return Snapshot(data=self._store)
@@ -112,7 +120,11 @@ class Workspace:
     def cas_commit(self, writes: Dict[FieldKey, Any], *,
                    write_specs: Dict[str, WriteSpec] | None = None,
                    provenance_id: str,
+                   writer: str | None = None,
                    before_publish: Optional[Callable[[], None]] = None) -> Snapshot:
+        if self._fields is not None:
+            self._fields.authorize(writes, writer)
+            self._fields.validate_json(writes, writer)
         if write_specs is not None:
             undeclared = set(writes) - set(write_specs)
             if undeclared:
@@ -124,6 +136,8 @@ class Workspace:
             value = deepcopy(value)
             if spec is not None and spec.merge_mode == MergeMode.MERGE_JSON and cur is not None:
                 value = merge_json_values(deepcopy(cur.value), value)
+            if self._fields is not None:
+                self._fields.validate_values({key: value}, writer)
             if spec is not None:
                 # Validators cannot retain or mutate the value to be published.
                 validate_value(spec, deepcopy(value))

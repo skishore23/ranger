@@ -172,3 +172,25 @@ def test_installed_evidence_example(installed):
     assert replay['status'] == 'succeeded'
     assert replay['state']['validation']['passed'] is True
     assert replay['state']['validation']['binding']['state'].keys() == {'candidate', 'criteria'}
+
+
+def test_literal_shared_field_example(tmp_path):
+    document = (ROOT / 'docs/FIELD_CONTRACTS.md').read_text()
+    example = document.split('```python\n', 1)[1].split('```', 1)[0]
+    script = tmp_path / 'fields_example.py'
+    script.write_text(example)
+    namespace = runpy.run_path(str(script), run_name='__main__')
+    assert namespace['result'].ok
+    assert (tmp_path / '.ranger/fields.db').exists()
+
+
+def test_installed_shared_field_example(installed):
+    python, cli, outside, source, mode = installed
+    document = (source / 'docs/FIELD_CONTRACTS.md').read_text()
+    example = document.split('```python\n', 1)[1].split('```', 1)[0]
+    script = outside / 'fields_example.py'
+    script.write_text(example)
+    command([python, script], outside)
+    replay = json.loads(command([cli, 'replay', '.ranger/fields.db', '--json'], outside))
+    assert replay['status'] == 'succeeded'
+    assert replay['state']['validation']['passed'] is True

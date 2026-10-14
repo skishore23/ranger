@@ -29,6 +29,8 @@ With `strict_contracts=True`, capability snapshots contain only declared inputs 
 
 After recording a run, `ranger explain .ranger/demo.db` shows why each capability ran or stayed idle; `--run-id ID --json` selects a run and returns machine-readable decisions. Boolean goals remain valid. Return `GoalCheck(met=False, unmet=["required check must pass"])` from `core.sdk` when a goal should explain its unfinished requirements.
 
+To constrain the workspace's values and writers, supply `field_contracts` with `FieldContract` definitions from `core.sdk`. The same schemas validate seeds and final merged updates. The map lists every allowed field; exact capability IDs govern updates and `allow_initial=True` separately permits seeds. Keep model-editable drafts and trusted approvals in separate keys. Omit this option for existing behavior. See the [shared field example](FIELD_CONTRACTS.md) and [evidence binding](EVIDENCE_BINDING.md) for complementary checks on admission and validation freshness.
+
 `Agent` records strict JSON evidence automatically. Replay reconstructs state without executing tools or models. Use `ranger replay .ranger/demo.db --json` to inspect the example. Default recording is `.ranger/runs.db`; explicit `trace=False` permits non-JSON Python state. Recording errors remain visible but cannot undo external effects.
 
 Defaults are 200000 estimated model token units, 300000 ms and 120 capability attempts; `max_steps=60` separately bounds batches. Explicit caps remain authoritative. Conservative request/completion reservations are not refunded. Synchronous deadlines cannot preempt in-flight work. See [API reference](API_REFERENCE.md) for precise limits.

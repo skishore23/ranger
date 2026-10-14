@@ -18,6 +18,8 @@ from .engine import Engine
 from .workspace import Snapshot
 from .merge import WriteSpec, MergeMode
 from .errors import SolveResult, GoalCheck
+from .fields import FieldContract
+from .contracts import FieldContractViolation
 from .runners.python_runner import PythonRunner
 from .runners.llm_runner import LLMRunner
 from .runners.human_runner import HumanRunner
@@ -376,7 +378,7 @@ class Agent:
     
     def __init__(self, tools: List[Capability], *, budget: Budget | None = None,
                  trace_path=".ranger/runs.db", trace: bool = True,
-                 strict_contracts: bool = False):
+                 strict_contracts: bool = False, field_contracts=None):
         """Initialize agent with tools.
         
         Args:
@@ -393,9 +395,12 @@ class Agent:
                 raise and cannot produce a successful SolveResult.
             strict_contracts: Limit capability snapshots to declared inputs and
                 raise ContractViolation on undeclared reads. Off for compatibility.
+            field_contracts: Optional complete map of FieldContract definitions.
+                Enforces shared schemas and writers on initial state and updates.
+                None disables it; an empty map permits no fields.
         """
         self.engine = Engine(tools, budget=budget, trace_path=trace_path, trace=trace,
-                             strict_contracts=strict_contracts)
+                             strict_contracts=strict_contracts, field_contracts=field_contracts)
     
     def run(
         self,
