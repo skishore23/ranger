@@ -107,7 +107,7 @@ class GuardPII(BaseGuardRegion):
                 redacted.append(atom)
                 continue
 
-            content = str(atom.content)
+            content = atom.content
             pii_types = []
             for match in matches:
                 pii_type = str(match.get("pii_type"))
@@ -116,7 +116,17 @@ class GuardPII(BaseGuardRegion):
                 pii_types.append(pii_type)
                 pattern = _PATTERNS[pii_type][0]
                 replacement = _REPLACEMENTS[pii_type]
-                content = re.sub(pattern, replacement, content)
+                def redact(value):
+                    if isinstance(value, str):
+                        return re.sub(pattern, replacement, value)
+                    if isinstance(value, dict):
+                        return {redact(k): redact(v) for k, v in value.items()}
+                    if isinstance(value, list):
+                        return [redact(v) for v in value]
+                    if isinstance(value, tuple):
+                        return tuple(redact(v) for v in value)
+                    return value
+                content = redact(content)
 
             policy = dict(atom.policy or {})
             policy.update({"redacted": True, "pii_types": sorted(set(pii_types))})

@@ -379,7 +379,10 @@ class Agent:
         
         Args:
             tools: List of tools this agent can execute
-            budget: Optional topology budget overrides
+            budget: Per-run ceilings for estimated model tokens, elapsed milliseconds,
+                and capability attempts. Defaults: 200000 tokens, 300000 ms, 120 calls.
+                Model requests reserve their estimated prompt size and completion
+                limit; unused reservations are not refunded.
         """
         self.engine = Engine(tools, budget=budget)
     
@@ -395,7 +398,9 @@ class Agent:
         Args:
             initial: Initial workspace state
             goal: Function that returns True when goal is achieved
-            max_steps: Maximum execution steps
+            max_steps: Maximum serial batches. Compatible capabilities within a batch
+                read the same selected snapshot. Synchronous work cannot be preempted;
+                elapsed limits are checked before and after execution.
         
         Returns:
             SolveResult with outcome and final state

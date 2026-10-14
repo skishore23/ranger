@@ -68,13 +68,20 @@ def reconcile_overlaps(summaries: Iterable[Atom], path: Path, goal: Dict[str, An
 def repair_context(atoms: Iterable[Atom], validation_result: Dict[str, Any], guard: Region) -> List[Atom]:
     """Allow guard regions to repair/redact atoms when violations occur."""
 
+    atom_list = list(atoms)
+    mode = getattr(guard, "mode", (getattr(guard, "policy", {}) or {}).get("mode", "mask"))
+    if mode == "block":
+        raise RuntimeError(f"Guard {guard.key} blocked execution")
     findings = validation_result.get("findings", [])
-    if hasattr(guard, "redact_atoms") and findings:
-        try:
-            return list(guard.redact_atoms(atoms, findings))  # type: ignore[attr-defined]
-        except Exception:
-            return list(atoms)
-    return list(atoms)
+    if not hasattr(guard, "redact_atoms") or not findings:
+        raise RuntimeError(f"Guard {guard.key} cannot repair violations")
+    repaired = list(guard.redact_atoms(atom_list, findings))
+    if [a.id for a in repaired] != [a.id for a in atom_list]:
+        raise RuntimeError(f"Guard {guard.key} changed atom identity during repair")
+    if guard.validate(repaired).get("ok") is not True:
+        raise RuntimeError(f"Guard {guard.key} failed to repair violations")
+    return repaired
+
 
 
 __all__ = [

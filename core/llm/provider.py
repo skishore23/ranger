@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from topology.registry import get_region
+from core.execution import protected_generation, generate_with_policy, guard_value, generation_limits, validate_max_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +77,14 @@ class RegionBackedProvider:
             raise RuntimeError(f"LLM region '{self.region_key}' not registered")
 
         options: Dict[str, Any] = dict(self.default_options)
-        if system:
-            options.setdefault("system_prompt", system)
+        if system is not None:
+            options["system_prompt"] = system
         if model:
-            options.setdefault("model", model)
+            options["model"] = model
         if temperature is not None:
-            options.setdefault("temperature", temperature)
+            options["temperature"] = temperature
         if max_tokens is not None:
-            options.setdefault("max_tokens", max_tokens)
+            options["max_tokens"] = max_tokens
 
         payload: Dict[str, Any] = {"text": prompt}
         if schema is not None:
@@ -95,16 +96,42 @@ class RegionBackedProvider:
         if max_tokens is not None:
             budget.setdefault("max_tokens", max_tokens)
 
-        atoms = list(region.infer(payload, window=[], budget=budget))
-        if not atoms:
-            raise RuntimeError(f"LLM region '{self.region_key}' returned no atoms")
+        payload = guard_value(payload)
 
-        content = atoms[0].content
-        if isinstance(content, str):
-            return content
-        if isinstance(content, dict):
-            return json.dumps(content)
-        return json.dumps(content, default=str)
+        def invoke(**request):
+            checked_payload = dict(request.get('region_payload', payload))
+            checked_payload['text'] = request['prompt']
+            checked_options = dict(checked_payload.get('options', {}))
+            checked_options.update({k: v for k, v in {
+                'system_prompt': request.get('system'), 'model': request.get('model'),
+                'temperature': request.get('temperature'), 'max_tokens': request.get('max_tokens'),
+            }.items() if v is not None})
+            checked_payload['options'] = checked_options
+            if request.get('schema') is not None:
+                checked_payload['schema'] = request['schema']
+            atoms = list(region.infer(checked_payload, window=[], budget=budget))
+            if not atoms:
+                raise RuntimeError(f"LLM region '{self.region_key}' returned no atoms")
+            content = atoms[0].content
+            return content if isinstance(content, str) else json.dumps(content)
+
+        request = dict(system=payload.get('options', {}).get('system_prompt'),
+                       prompt=payload['text'], model=payload.get('options', {}).get('model', model),
+                       temperature=payload.get('options', {}).get('temperature'),
+                       max_tokens=payload.get('options', {}).get('max_tokens'), schema=payload.get('schema'))
+        if getattr(region.infer, '__ranger_protected__', False) is True:
+            return invoke(**request)
+        from types import SimpleNamespace
+        validate_max_tokens(request['max_tokens'])
+        request['region_payload'] = payload
+        if budget.get('max_tokens') is not None:
+            ceiling = validate_max_tokens(budget['max_tokens'])
+            request['max_tokens'] = min(request['max_tokens'], ceiling) if request['max_tokens'] is not None else ceiling
+        with generation_limits(budget or None):
+            return generate_with_policy(SimpleNamespace(generate=invoke), **request)
+
+
+    generate.__ranger_protected__ = True
 
 
 class OpenAIProvider:
@@ -127,6 +154,7 @@ class OpenAIProvider:
         except ImportError:
             raise ImportError("openai package required: pip install openai")
     
+    @protected_generation
     def generate(
         self, 
         *, 
@@ -163,12 +191,12 @@ class OpenAIProvider:
         request_params = {
             "model": model,
             "messages": messages,
-            "temperature": temperature or 0.2,
-            "max_tokens": max_tokens or 1500
+            "temperature": 0.2 if temperature is None else temperature,
+            "max_tokens": 1500 if max_tokens is None else max_tokens
         }
         
         # Add JSON mode if requested
-        if schema:
+        if schema is not None:
             request_params["response_format"] = {"type": "json_object"}
             # OpenAI requires the word "json" in messages when using JSON mode
             if not any("json" in str(msg.get("content", "")).lower() for msg in messages):
@@ -215,6 +243,7 @@ class ClaudeProvider:
         except ImportError:
             raise ImportError("anthropic package required: pip install anthropic")
     
+    @protected_generation
     def generate(
         self, 
         *, 
@@ -234,8 +263,8 @@ class ClaudeProvider:
         # Claude API call
         response = self.client.messages.create(
             model=model,
-            max_tokens=max_tokens or 1500,
-            temperature=temperature or 0.2,
+            max_tokens=1500 if max_tokens is None else max_tokens,
+            temperature=0.2 if temperature is None else temperature,
             system=system or "",
             messages=messages
         )
@@ -244,7 +273,7 @@ class ClaudeProvider:
         
         # Note: Claude doesn't have native JSON mode like OpenAI
         # For structured output, you'd need to add JSON parsing instructions to the prompt
-        if schema:
+        if schema is not None:
             logger.debug("      ⚠️  Claude: JSON schema enforcement via prompt instructions")
         
         return content

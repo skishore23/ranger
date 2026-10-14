@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Tuple, Optional
 from topology.types import Atom, RegionKind, Budget
 from core.errors import GoalBlocked
 from core.llm.provider import OpenAIProvider
+from core.execution import generate_with_policy, generation_limits, validate_max_tokens
 
 
 class LLMOpenAI:
@@ -66,15 +67,17 @@ class LLMOpenAI:
 
         budget_overrides: Dict[str, Any] = {}
         if isinstance(budget, Budget):
-            budget_overrides["max_tokens"] = budget.tokens if budget.tokens else None
+            budget_overrides["tokens"] = budget.tokens
         elif isinstance(budget, dict):
             budget_overrides.update(budget)
 
-        max_tokens = (
-            options.get("max_tokens")
-            or budget_overrides.get("max_tokens")
-            or self.max_tokens
-        )
+        max_tokens = options.get("max_tokens", self.max_tokens)
+        if max_tokens is None:
+            max_tokens = self.max_tokens
+        validate_max_tokens(max_tokens)
+        validate_max_tokens(budget_overrides.get("max_tokens"))
+        if budget_overrides.get("max_tokens") is not None:
+            max_tokens = min(max_tokens, budget_overrides["max_tokens"])
 
         temperature_override = options.get("temperature")
         if temperature_override is None:
@@ -83,14 +86,17 @@ class LLMOpenAI:
 
         message = self._build_prompt(prompt, window_list)
         try:
-            response = self._provider.generate(
-                system=system_prompt,
-                prompt=message,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                schema=prompt.get("schema"),
-            )
+            with generation_limits(budget):
+                response = generate_with_policy(self._provider,
+                    system=system_prompt,
+                    prompt=message,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    schema=prompt.get("schema"),
+                )
+        except GoalBlocked:
+            raise
         except Exception as exc:  # noqa: BLE001 - surface as goal block for retry
             raise GoalBlocked("llm_unavailable", details={"error": str(exc)}) from exc
         atom = self._create_atom(
@@ -101,6 +107,8 @@ class LLMOpenAI:
             max_tokens=max_tokens,
         )
         yield atom
+
+    infer.__ranger_protected__ = True
 
     # Tool interface (unused)
     def act(self, window: Iterable[Atom]):  # pragma: no cover - not used

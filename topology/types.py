@@ -24,12 +24,22 @@ class Atom:
 
 @dataclass
 class Budget:
-    """Execution budget shared across planner and packer."""
+    """Per-run ceilings for estimated model tokens, elapsed milliseconds, and capability attempts."""
 
     tokens: int
     ms: int
     calls: int
     by_modality: Optional[Dict[Modality, int]] = None
+
+    def __post_init__(self):
+        for name in ('tokens', 'ms', 'calls'):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.by_modality is not None:
+            for name, value in self.by_modality.items():
+                if type(value) is not int or value < 0:
+                    raise ValueError(f"by_modality[{name!r}] must be a non-negative integer")
 
 
 class Region(Protocol):

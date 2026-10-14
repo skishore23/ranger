@@ -8,6 +8,7 @@ from typing import Callable, Dict, Any, Optional, List
 from ..workspace import Snapshot
 from ..capability import Capability
 from ..llm.provider import LLMProvider, resolve_llm_profile
+from ..execution import generate_with_policy, validate_response
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +92,8 @@ class LLMRunner:
         
         # Render prompt from template
         if self.template:
-            try:
-                from jinja2 import Template  # type: ignore
-                prompt = Template(self.template).render(**template_vars)
-            except ImportError:
-                # Simple string formatting fallback
-                prompt = self.template.format(**template_vars)
+            from jinja2 import Template
+            prompt = Template(self.template).render(**template_vars)
         else:
             prompt = str(template_vars)
         
@@ -123,7 +120,7 @@ class LLMRunner:
         logger.debug("   🔍   Model=%s temp=%s max_tokens=%s", model, temperature, max_tokens)
 
         # Generate response
-        response = provider.generate(
+        response = generate_with_policy(provider,
             system=system,
             prompt=prompt,
             model=model,
@@ -133,13 +130,9 @@ class LLMRunner:
         )
         
         # Parse JSON response if schema provided
-        if self.schema:
-            import json
-            try:
-                parsed_response = json.loads(response)
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"LLM returned invalid JSON: {e}") from e
-            
+        if self.schema is not None:
+            parsed_response = validate_response(response, self.schema)
+
             # If single output field, map the entire parsed response to that field
             write_keys = list(cap.writes)
             if len(write_keys) == 1:
