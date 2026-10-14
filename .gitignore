@@ -20,3 +20,6 @@ coverage.xml
 logs
 .ranger/
 .testwriter_coverage.json
+build/
+dist/
+*.egg-info/

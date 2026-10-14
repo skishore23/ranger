@@ -1,86 +1,50 @@
 # Ranger API Reference
 
-This quick reference summarises the core APIs you touch when building agents.
+## State and capabilities
 
----
+`Snapshot` supports `snapshot[key]`, `key in snapshot`, `get(key, default=None)`, `value(key)`, `exists(key)` and `data`. Values are defensive copies, including nested lists/dicts. `Workspace.cas_commit(writes, write_specs=..., provenance_id=...)` stages and validates the complete merged write set before publishing it. `WriteSpec` controls merge mode, schema and validators; this is runtime validation rather than static typing.
 
-## Plan composition (`core.plan`)
+Import decorators from `core.sdk`:
 
-- `action(capability, requires_initial=None, note=None)` – Wrap a decorated capability as an action node. `requires_initial` lists keys expected in the initial state; `note` adds human-readable context.
-- `plan(*components)` – Compose actions (or existing plans) into a `Plan`. Supports fluent chaining via the `>>` operator.
-- `Plan.actions` / `Plan.capabilities` – Ordered tuples of the actions or underlying capabilities.
-- `Plan.missing_inputs` – Sequence of `(action_id, missing_keys)` that upstream actions did not satisfy.
-- `Plan.initial_requirements` – Set of keys every run must seed in the initial state.
-- `Plan.validate(strict=True)` – Returns missing inputs; with `strict=True` raises `GoalBlocked("plan_missing_inputs")` when wiring is incomplete.
-- `Plan.describe()` – Human-readable outline of the plan, including initial requirements and unresolved inputs.
-- `Plan.compile(budget=None, strict=True)` – Compile the plan into a `core.sdk.Agent`, performing validation before returning.
+- `@step(inputs=[...], outputs=[...])`: a pure Python transform returning declared writes.
+- `@tool(inputs=[...], outputs=[...])`: an action with side effects returning declared writes.
+- `@llm(provider=..., profile=..., template=..., schema=..., map=..., ...)`: model generation through the policy/budget boundary. Supply a concrete provider, region key or registered profile. Profile configuration cannot be combined with provider/region overrides; model/system/temperature/completion overrides remain supported.
+- `@human(inputs=[...], outputs=[...], fields=[...])`: interactive CLI collection when stdin is a TTY; otherwise the callback receives no captured responses. Two-argument callbacks receive `(responses, snapshot)`. Select fields default a blank selection to their first option unless `default_first_option=False`; approval callbacks must validate explicitly.
+- `@goal(scope=[...])`: predicate checking completion once scope keys exist. Raising `GoalBlocked(reason, details={...})` terminates the run unsuccessfully.
 
----
+Capabilities returning an empty dict successfully consume the selected input digest. An LLM `map` function may raise `core.runners.llm_runner.SkipLLM` to do the same without invoking a provider. Changed input values make the capability ready again. A single-output structured LLM capability stores the **whole parsed response** under that key; multiple outputs map response keys directly to declared outputs. Supplied JSON Schema is validated before committing output, including an empty schema. Explicit `temperature=0.0` is preserved.
+
+## Agent and budgets
+
+`Agent(tools, *, budget=None, trace_path='.ranger/runs.db', trace=True)` constructs the SDK runner. `run(*, initial, goal, max_steps=60)` returns `SolveResult(ok, final, blocker, steps, run_id)`. Ordinary capability exceptions are re-raised after recording a failed outcome. `WhyNot` describes an unsuccessful solve; callers should inspect `ok` before using final outputs.
+
+`topology.types.Budget(tokens=200000, ms=300000, calls=120)` specifies per-run ceilings. Those are also the default Agent budgets; explicit supplied limits take precedence. Calls count capability attempts, including retries. `max_steps` counts serial batches. Compatible capabilities read the same selected snapshot, with per-capability commits and no cross-capability read/write or write/write conflicts. Scheduling uses execution recency, compute priority and capability ID; no concurrent execution is provided.
+
+Model tokens are estimated conservatively: serialized full-request UTF-8 bytes + 64 framing units + reserved completion limit (1500 when omitted), clamped to remaining allowance. Reservations are never refunded; custom providers must honor requested completion caps. Custom region adapters additionally account for region payloads. This is not provider billing measurement. Time checks surround synchronous work and publication; they cannot preempt in-flight work or undo side effects. An already met initial goal needs no execution allowance.
+
+For direct custom provider calls in Python steps, use `core.execution.generate_with_policy(provider, system=..., prompt=..., model=..., temperature=..., max_tokens=..., schema=...)`. `@llm` and built-in adapters already use this boundary. Registered guards enforce policy on complete requests/action inputs, fail closed on errors/failed repairs, and reject schema-changing repairs. They do not sandbox arbitrary Python.
+
+## Recording and replay (`core.trace`)
+
+SDK recording defaults to `.ranger/runs.db` relative to cwd. `trace_path` changes the database; `trace=False` opts out and leaves `run_id=None`. Low-level `core.engine.Engine` defaults to nonrecording. `Plan.compile` forwards trace options. State/evidence must be strict JSON: None, exact bool/int, finite float, str, list, string-keyed dict. Tuples, sets, custom objects, non-string keys, cycles and nonfinite numbers fail visibly. Recorder errors propagate and cannot certify persistence; prior side effects or workspace publication cannot be rolled back by the recorder.
+
+- `replay_run(db_path, run_id=None)` returns `{state, run_id, status, events}`. Omitted ID selects the latest started run. Status is `succeeded`, `blocked`, `failed`, or `running` for incomplete execution.
+- `diff_runs(db_path, left_id, right_id)` returns IDs and `added`, `removed`, `changed` dictionaries; changed values carry `left`/`right`.
+- `ranger replay DB --run-id ID --json` and `ranger diff DB --left ID --right ID --json` inspect recorded state.
+- `ScenarioHarness.from_sqlite(db_path, domain=None, run_id=None)` and `ranger scenario DB --run-id ID --json` verify recorded outcome evidence. Missing/failed/incomplete evidence is unsuccessful. Legacy testwriter scenarios require real sufficient coverage and successful execution.
+
+Replay is read-only state reconstruction. It never runs providers, tools, human callbacks or goal predicates. Structural validation rejects malformed records; local SQLite evidence is mutable and does not authenticate a consistently rewritten log. Atom HMAC/lineage helpers are separate opt-in mechanisms.
+
+## Plans and runtime
+
+- `action(capability, requires_initial=None, note=None)` wraps a capability; `requires_initial` lists seeded state keys.
+- `plan(*components)` composes actions/plans, also supporting `>>`.
+- `Plan.actions` / `Plan.capabilities` expose ordered tuples; `initial_requirements` exposes seeded keys; `missing_inputs` describes unsatisfied inputs.
+- `Plan.validate(strict=True)` raises `GoalBlocked('plan_missing_inputs')` for incomplete wiring; `describe()` prints an outline.
+- `Plan.compile(*, budget=None, strict=True, trace_path='.ranger/runs.db', trace=True)` returns an SDK Agent.
+
+`agents.common.runtime.AgentRuntime` accepts `repo_root`, `plan` or `capability_list`, required budget/memory key/domain/database filename, and optional registry/guard/memory/visualization options. Subclasses override `build_plan()` or `build_capabilities()`. `run_agent(goal=..., max_steps=..., initial=None)` runs the compiled agent. `build_initial_state`, `scenario_report(coverage_target=None, run_id=None)` and `scenario_timeline` support inspection. The effective memory database/domain also select execution evidence. Construction and visualization preserve stored rows; `memory_kwargs={'purge': True}` deliberately purges memory atoms.
 
 ## LLM profiles (`core.llm.provider`)
 
-- `register_llm_profile(name, *, provider=None, region_key=None, defaults=None, region_budget=None, region_factory=None)` – Declare a reusable LLM configuration. Provide either a concrete provider or a `region_key`. `defaults` may include `model`, `temperature`, `system`, `max_tokens`. `region_factory` can lazily register the region.
-- `resolve_llm_profile(name)` – Returns `(provider, defaults)` and registers the region on demand if `region_factory` was supplied.
-- `list_llm_profiles()` / `clear_llm_profiles()` – Introspection and reset helpers (useful in tests).
-
-Example profile setup:
-
-```
-register_llm_profile(
-    "myagent.generate",
-    region_key="myagent.llm",
-    defaults={"model": "gpt-4o-mini", "temperature": 0.0},
-    region_factory=lambda: setup_openai_llm(key="myagent.llm", model="gpt-4o-mini", temperature=0.0),
-)
-
-@llm(profile="myagent.generate", inputs=[...], outputs=[...])
-def generate(_: Snapshot):
-    ...
-```
-
----
-
-## Decorators (`core.sdk`)
-
-- `@step(inputs=[...], outputs=[...])` – Pure transform; return a dict with the declared outputs.
-- `@tool(inputs=[...], outputs=[...])` – Side-effecting step (filesystem, HTTP, etc.).
-- `@llm(profile="…", ...)` – LLM-backed tool powered by a registered profile. You may still pass explicit overrides such as `model=` or `temperature=`.
-- `@human(inputs=[...], outputs=[...], fields=[...])` – Non-blocking human-in-the-loop review or approval.
-- `@goal(scope=[...])` – Termination predicate; raise `GoalBlocked(reason, details={...})` for recoverable blockers.
-
-Import these from `core.sdk` and implement each function with the signature
-`fn(snapshot: Snapshot) -> dict` (or `None`).
-
----
-
-## Runtime scaffold (`agents.common.runtime.AgentRuntime`)
-
-- Constructor parameters:
-  - `repo_root` (optional path, defaults to `Path.cwd()`)
-  - `plan` (preferred) or `capability_list`
-  - `memory_key`, `memory_domain`, `db_filename`
-  - `auto_visualize`, `guard_regions`, `memory_kwargs`
-- Override `build_plan()` to return a plan; the runtime will compile it once and expose it via the `plan` property.
-- `run_agent(goal=..., max_steps=..., initial=None)` executes the compiled agent with standard budgeting and telemetry.
-- Helpers: `build_initial_state(extra=None)`, `scenario_report(...)`, `scenario_timeline()`.
-
----
-
-## LLM workflow checklist
-
-1. Register profiles (usually inside `build_plan()`).
-2. Decorate capabilities with `@llm(profile="your.profile", ...)`.
-3. Run the agent—profiles resolve lazily so updated configuration is honoured.
-
----
-
-## Debug aids
-
-- `plan.validate(strict=True)` fails fast when wiring is incomplete.
-- `plan.describe()` prints the action chain, initial requirements, and unresolved inputs.
-- `GoalBlocked("plan_missing_inputs")` indicates the initial state (or upstream actions) must provide additional keys.
-
-See also:
-
-- `docs/AGENT_GUIDE.md` for a quick start walkthrough.
-- `docs/README.md` for the full documentation index.
+`register_llm_profile(name, *, provider=None, region_key=None, defaults=None, region_budget=None, region_factory=None)` stores a provider or region configuration. Defaults may include model, temperature, system and max_tokens. Factories lazily register regions. `resolve_llm_profile(name)` returns `(provider, defaults)`; `list_llm_profiles()` and `clear_llm_profiles()` support inspection/reset. See the [offline provider guide](LLM_PROVIDER_GUIDE.md) and [agent guide](AGENT_GUIDE.md).

@@ -62,10 +62,15 @@ def init(
         """
         \"\"\"{name} agent package.\"\"\"
 
-        from .agent import {class_name}
-
-
         __all__ = ["{class_name}"]
+
+
+        def __getattr__(name):
+            # Keep the public class import without preloading the module entrypoint.
+            if name == "{class_name}":
+                from .agent import {class_name}
+                return {class_name}
+            raise AttributeError(name)
         """
     ).strip()
     __init__ = __init_template.format(name=name, class_name=class_name) + "\n"
@@ -181,6 +186,14 @@ def init(
                     goal=capabilities.onboarding_complete,
                     max_steps=max_steps,
                 )
+
+
+        if __name__ == "__main__":
+            result = {class_name}().run()
+            if not result.ok:
+                raise SystemExit(f"Agent blocked: {{result.blocker}}")
+            print(result.final[capabilities.MESSAGE_KEY])
+            print(f"Run ID: {{result.run_id}}")
         """
     ).strip()
     agent = agent_template.format(name=name, class_name=class_name, package=package) + "\n"

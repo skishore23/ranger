@@ -1,0 +1,31 @@
+name: Offline tests and installed workflows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      # Workflows inject deterministic providers and retrieval fixtures.
+      OPENAI_API_KEY: ''
+      ANTHROPIC_API_KEY: ''
+      FIRECRAWL_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Install development dependencies
+        run: uv pip install --system -e '.[dev]'
+      - name: Run offline suite including clean wheel and editable installs
+        run: python -m pytest -q
+      - name: Check whitespace
+        run: git diff --check

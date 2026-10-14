@@ -1,174 +1,42 @@
-# LLM Provider System Guide
+# LLM Provider Guide
 
-The new Ranger SDK includes a pluggable LLM provider system that makes it incredibly easy to swap between different LLM providers (OpenAI, Claude, Groq, local models, etc.) with zero code changes.
-
-## Quick Start
-
-### Basic Usage
+`core.llm.provider.LLMProvider` defines synchronous `generate(*, system=None, prompt, model, temperature=None, max_tokens=None, schema=None) -> str`. Inject a provider into `@llm` to test without any external service. This complete example renders Jinja2, validates JSON Schema and stores the parsed dict under a single declared output:
 
 ```python
-from core.sdk import llm, tool, goal, Agent
-from core.llm.provider import OpenAIProvider
+import json
+from core.sdk import llm, goal, Agent
+from core.llm.provider import register_llm_profile
 
-# Create an LLM tool
-@llm(
-    inputs=["input"], 
-    outputs=["output"],
-    provider=OpenAIProvider(),  # 👈 Just change this line to swap providers!
-    model="gpt-4o-mini",
-    system="You are a helpful assistant.",
-    template="Process this: {{input}}"
-)
-def process_text(ws): pass
+class OfflineProvider:
+    def generate(self, *, system=None, prompt, model, temperature=None,
+                 max_tokens=None, schema=None):
+        assert temperature == 0.0
+        return json.dumps({"text": f"Hello {prompt}!"})
 
-# Use in an agent
-agent = Agent([process_text])
-result = agent.run(initial={"input": "Hello world"}, goal=my_goal)
+register_llm_profile("greeting", provider=OfflineProvider(),
+                     defaults={"model": "offline", "temperature": 0.0, "max_tokens": 100})
+
+@llm(profile="greeting", inputs=["name"], outputs=["greeting"], template="{{ name }}",
+     schema={"type": "object", "properties": {"text": {"type": "string"}},
+             "required": ["text"]})
+def greet(state):
+    pass
+
+@goal(scope=["greeting"])
+def done(state):
+    return state["greeting"]["text"] == "Hello Ranger!"
+
+result = Agent([greet]).run(initial={"name": "Ranger"}, goal=done)
+assert result.ok, result
+print(result.final["greeting"]["text"])
 ```
 
-## Available Providers
+`map=` can return template variables or raise `core.runners.llm_runner.SkipLLM` to skip generation. The skipped capability consumes its current inputs; changed inputs make it ready again. See the README ReAct example for a dependency-gated answer.
 
-### 1. OpenAI Provider
-```python
-from core.llm.provider import OpenAIProvider
+Built-in adapters are `OpenAIProvider`, `ClaudeProvider` and `RegionBackedProvider`. OpenAI uses its SDK and configured credentials; Claude requires the optional `anthropic` package and credentials. There are no shipped Groq or local-server provider classes. A custom implementation can call a local service using the same protocol. It must respect the requested completion ceiling and return text (JSON text when a schema is supplied).
 
-provider = OpenAIProvider()  # Uses existing OpenAIAdapter
-# Requires: OPENAI_API_KEY environment variable
-```
+`@llm` requires a provider, `region_key`, configured default region or profile when the decorator is constructed. A profile cannot be combined with explicit provider/region overrides, but model/system/temperature/max_tokens overrides are supported. Profiles resolve lazily; `register_llm_profile` can use a concrete provider as above or a region key plus a factory.
 
-### 2. Claude Provider  
-```python
-from core.llm.provider import ClaudeProvider
+All LLM runner calls and built-in adapters use the registered guard and budget boundary. If a Python capability calls a custom provider directly, route the call through `core.execution.generate_with_policy(provider, ...)`; arbitrary direct `.generate()` calls cannot be intercepted automatically. Guards check the complete request, including system/context/options/schema, and block on errors or failed repairs. Repairs cannot change the original schema. Response validation retains the original schema even if the provider mutates its received copy.
 
-provider = ClaudeProvider()
-# Requires: pip install anthropic + ANTHROPIC_API_KEY
-```
-
-### 3. Groq Provider
-```python
-from core.llm.provider import GroqProvider
-
-provider = GroqProvider()
-# Requires: pip install groq + GROQ_API_KEY
-```
-
-### 4. Local LLM Provider
-```python
-from core.llm.provider import LocalLLMProvider
-
-provider = LocalLLMProvider("http://localhost:11434")  # Ollama
-# Requires: Local ollama server running
-```
-
-## Swapping Providers
-
-The beauty of this system is that **the same agent code works with any provider**:
-
-```python
-# Define your agent once
-@llm(inputs=["text"], outputs=["summary"], 
-     provider=None,  # We'll set this later
-     template="Summarize: {{text}}")
-def summarize(ws): pass
-
-# Swap providers easily
-providers = {
-    "openai": OpenAIProvider(),
-    "claude": ClaudeProvider(), 
-    "groq": GroqProvider(),
-    "local": LocalLLMProvider()
-}
-
-# Same agent, different provider
-for name, provider in providers.items():
-    summarize.runner.provider = provider  # Runtime swap!
-    agent = Agent([summarize])
-    # ... run agent
-```
-
-## Creating Custom Providers
-
-Implement the `LLMProvider` protocol:
-
-```python
-class MyCustomProvider:
-    def generate(self, *, system=None, prompt, model, temperature=None, 
-                 max_tokens=None, schema=None) -> str:
-        # Your implementation here
-        return "Generated response"
-
-# Use it
-@llm(provider=MyCustomProvider(), ...)
-def my_capability(ws): pass
-```
-
-## Advanced Features
-
-### JSON Schema Support
-```python
-@llm(
-    inputs=["data"], 
-    outputs=["structured_output"],
-    provider=OpenAIProvider(),
-    schema={
-        "type": "object",
-        "properties": {
-            "structured_output": {"type": "string"}
-        }
-    }
-)
-def extract_data(ws): pass
-```
-
-### Template Variables
-```python
-@llm(
-    inputs=["name", "age"], 
-    outputs=["greeting"],
-    template="Hello {{name}}, you are {{age}} years old!",
-    map=lambda ws: {"name": ws.value("name"), "age": ws.value("age")}
-)
-def greet_person(ws): pass
-```
-
-## Error Handling
-
-The system is designed to **fail fast** with clear error messages:
-
-- Missing API keys: `ValueError: OPENAI_API_KEY environment variable not set`
-- Missing packages: `ImportError: anthropic package required: pip install anthropic`
-- Invalid JSON: `RuntimeError: LLM returned invalid JSON: ...`
-- Write violations: `RuntimeError: LLM capability wrote undeclared fields: ['extra_field']`
-
-## Best Practices
-
-1. **Provider Selection**: Choose based on your needs:
-   - OpenAI: Best general performance, JSON mode support
-   - Claude: Great for reasoning, longer contexts
-   - Groq: Fastest inference for supported models
-   - Local: Privacy, cost control, offline usage
-
-2. **Error Handling**: Always handle provider unavailability gracefully
-
-3. **Schema Design**: Use JSON schemas for structured output when possible
-
-4. **Template Design**: Keep templates simple and focused
-
-5. **Testing**: Use mock providers for testing (see examples/provider_swapping_demo.py)
-
-## Examples
-
-See `examples/provider_swapping_demo.py` for a complete working example that demonstrates:
-- How to swap providers with zero code changes
-- Creating custom mock providers for testing
-- Handling provider availability gracefully
-- Best practices for agent design
-
-## Key Benefits
-
-✅ **Zero Code Changes**: Same agent works with any provider  
-✅ **Fail Fast**: Clear errors when providers unavailable  
-✅ **Type Safe**: Full mypy compatibility  
-✅ **Extensible**: Easy to add new providers  
-✅ **Consistent**: Same interface across all providers  
-✅ **Functional**: Follows Ranger's functional architecture principles
+Default budgets reserve conservative full-request UTF-8 bytes + 64 framing units + completion allowance, without refunds. Zero/smaller explicit budgets are authoritative; completion allowance is clamped. Invalid JSON/schema results cannot commit. Explicit zero temperature is preserved. Deadline checks cannot interrupt synchronous provider work. These policy checks do not isolate arbitrary Python. See [API reference](API_REFERENCE.md) for accounting and recording details.
