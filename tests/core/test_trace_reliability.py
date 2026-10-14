@@ -349,3 +349,54 @@ def test_recency_prevents_writer_starvation_and_resets_each_run(tmp_path, revers
         assert result.ok
         assert int(result.final['done']) == initial + 1
     assert calls == [('loop', 0), ('consume', 1), ('loop', 10), ('consume', 11)]
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('skip_kind', ['empty_writes', 'skip_llm'])
+def test_noop_does_not_terminate_before_deferred_consumer(tmp_path, reverse, skip_kind):
+    from core.runners.llm_runner import SkipLLM
+    from core.sdk import llm
+    calls = []
+    if skip_kind == 'skip_llm':
+        class Provider:
+            def generate(self, **kwargs):
+                raise AssertionError('Skipped LLM must not invoke provider')
+        def skip(s):
+            calls.append('noop')
+            raise SkipLLM()
+        @llm(inputs=['n'], outputs=['n'], name='a.noop', provider=Provider(), map=skip)
+        def noop(s):
+            pass
+        consumer_decorator = tool
+    else:
+        @step(inputs=['n'], outputs=['n'], name='a.noop')
+        def noop(s):
+            calls.append('noop')
+            return {}
+        consumer_decorator = step
+    @consumer_decorator(inputs=['n'], outputs=['done'], name='b.consume')
+    def consume(s):
+        calls.append('consume')
+        return {'done': s['n']}
+    caps = [consume, noop] if reverse else [noop, consume]
+    result = Agent(caps, trace_path=tmp_path / 'runs.db').run(initial={'n': 0}, goal=lambda s: s.exists('done'), max_steps=4)
+    assert result.ok and result.final['done'] == 0
+    assert calls == ['noop', 'consume']
+
+
+def test_noop_missing_output_is_suppressed_until_reads_change(tmp_path):
+    calls = []
+    @step(inputs=['n'], outputs=['missing'], name='a.noop')
+    def noop(s):
+        calls.append(s['n'])
+        return {}
+    result = Agent([noop], trace_path=tmp_path / 'single.db').run(initial={'n': 0}, goal=lambda s: False, max_steps=20)
+    assert not result.ok and result.blocker.reason == 'no_progress'
+    assert calls == [0]
+    @step(inputs=['n'], outputs=['n'], name='b.advance')
+    def advance(s):
+        return {'n': s['n'] + 1}
+    calls.clear()
+    result = Agent([noop, advance], trace_path=tmp_path / 'loop.db').run(initial={'n': 0}, goal=lambda s: s['n'] == 2, max_steps=4)
+    assert result.ok
+    assert calls == [0, 1]

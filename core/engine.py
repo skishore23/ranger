@@ -115,7 +115,7 @@ class Engine:
                 # Preserve earlier successful commits in a partially executed batch.
                 return SolveResult(False, ws.snapshot(), WhyNot(blocked.reason, details=blocked.details), step + 1)
             digest = snap.digest()
-            if digest in seen and not self._pending:
+            if digest in seen and not self._pending and not self._find_ready(snap):
                 return SolveResult(False, snap, WhyNot('no_progress'), step + 1)
             seen.add(digest)
 
@@ -124,8 +124,9 @@ class Engine:
         for cap in self.capabilities:
             if any(not snap.exists(k) for k in (cap.reads or set())):
                 continue
+            # Successful no-ops (including SkipLLM) consume this input version.
+            # Missing outputs alone do not force a retry; soft failures use pending.
             if (cap.id in self._pending
-                or any(not snap.exists(k) for k in (cap.writes or set()))
                 or self._last_read_digest.get(cap.id) != _digest_reads(cap, snap)):
                 ready.append(cap)
         return ready
