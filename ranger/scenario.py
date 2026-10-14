@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from core.errors import GoalBlocked
+from core.trace import replay_run, readonly
 
 
 @dataclass
@@ -57,6 +59,8 @@ class ScenarioReport:
     coverage: Optional[CoverageMetrics]
     goal_blocked: Optional[GoalBlockedSimulation]
     atoms: Sequence[AtomRecord]
+    run_id: Optional[str] = None
+    status: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         coverage_payload: Optional[Dict[str, Any]]
@@ -83,6 +87,8 @@ class ScenarioReport:
 
         return {
             "ok": self.ok,
+            "run_id": self.run_id,
+            "status": self.status,
             "coverage": coverage_payload,
             "goal_blocked": goal_blocked_payload,
             "atoms": [
@@ -101,8 +107,9 @@ class ScenarioReport:
 class ScenarioHarness:
     """Replay helper for analysing stored atoms and expected outcomes."""
 
-    def __init__(self, atoms: Sequence[AtomRecord]) -> None:
+    def __init__(self, atoms: Sequence[AtomRecord], *, execution=None) -> None:
         self._atoms: List[AtomRecord] = list(atoms)
+        self.execution = execution
 
     @classmethod
     def from_sqlite(
@@ -111,12 +118,45 @@ class ScenarioHarness:
         *,
         domain: Optional[str] = None,
         limit: Optional[int] = None,
+        run_id: Optional[str] = None,
     ) -> "ScenarioHarness":
         """Load atoms from a SQLite memory store."""
 
-        connection = sqlite3.connect(str(db_path))
+        connection = readonly(db_path)
         connection.row_factory = sqlite3.Row
+        execution = None
         try:
+            tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "execution_runs" in tables:
+                conditions, params = [], []
+                if run_id is not None:
+                    conditions.append("run_id = ?")
+                    params.append(run_id)
+                if domain is not None:
+                    conditions.append("domain = ?")
+                    params.append(domain)
+                clause = " AND ".join(conditions) or "1=1"
+                selected = connection.execute(
+                    "SELECT run_id FROM execution_runs WHERE " + clause + " ORDER BY started_ns DESC, rowid DESC LIMIT 1", params).fetchone()
+                if selected:
+                    execution = replay_run(db_path, selected[0])
+                    atoms = []
+                    for event in execution['events']:
+                        if event['kind'] != 'memory_atom':
+                            continue
+                        evidence = event['payload']
+                        if domain is not None and evidence['domain'] != domain:
+                            continue
+                        a = evidence['atom']
+                        atoms.append(AtomRecord(a['id'], a['schema'], a['modality'], a['content'],
+                                                a['facets'], a['provenance'], evidence['timestamp']))
+                    return cls(atoms, execution=execution)
+                if run_id is not None:
+                    raise ValueError("No matching execution run in domain")
+            elif run_id is not None:
+                raise ValueError("No execution log for requested run")
+            if "atoms" not in tables:
+                return cls([], execution=execution)
             conditions: List[str] = []
             params: List[Any] = []
             if domain:
@@ -140,7 +180,7 @@ class ScenarioHarness:
             connection.close()
 
         atoms = [cls._row_to_atom(row) for row in rows]
-        return cls(atoms)
+        return cls(atoms, execution=execution)
 
     @staticmethod
     def _row_to_atom(row: sqlite3.Row) -> AtomRecord:
@@ -182,7 +222,14 @@ class ScenarioHarness:
     def generate_report(self, *, coverage_target: Optional[float] = None) -> ScenarioReport:
         coverage = self._extract_coverage(coverage_target)
         blocked: Optional[GoalBlockedSimulation] = None
-        ok = True
+        execution_atom = self._latest_execution_atom()
+        payload = execution_atom.content if execution_atom and isinstance(execution_atom.content, dict) else {}
+        execution_ok = payload.get("status") == "passed" and payload.get("returncode", 0) == 0
+        ok = bool(coverage and coverage.passed and execution_ok)
+        if self.execution is not None:
+            ok = self.execution['status'] == 'succeeded'
+            if execution_atom is not None or coverage_target is not None:
+                ok = ok and bool(coverage and coverage.passed and execution_ok)
 
         if coverage and not coverage.passed:
             blocked = GoalBlockedSimulation(
@@ -197,7 +244,11 @@ class ScenarioHarness:
             )
             ok = False
 
-        return ScenarioReport(ok=ok, coverage=coverage, goal_blocked=blocked, atoms=self.atoms)
+        if not ok and blocked is None:
+            blocked = GoalBlockedSimulation(reason="execution_failed" if execution_atom or self.execution else "no_execution_data", details={})
+        return ScenarioReport(ok=ok, coverage=coverage, goal_blocked=blocked, atoms=self.atoms,
+                              run_id=self.execution['run_id'] if self.execution else None,
+                              status=self.execution['status'] if self.execution else None)
 
     def assert_coverage(self, *, coverage_target: Optional[float] = None) -> None:
         """Raise GoalBlocked if coverage is below the supplied or inferred target."""
@@ -211,6 +262,8 @@ class ScenarioHarness:
         if not report.coverage.passed:
             details = report.goal_blocked.details if report.goal_blocked else {}
             raise GoalBlocked("coverage_shortfall", details=details)
+        if not report.ok:
+            raise GoalBlocked("execution_failed")
 
     def render_timeline(self, *, width: int = 50) -> List[str]:
         """Return an ASCII timeline representation of the loaded atoms."""
@@ -243,10 +296,17 @@ class ScenarioHarness:
         assumed = False
         missing_files: List[str] = []
 
+        valid_coverage = False
         if isinstance(coverage_data, dict):
             totals = coverage_data.get("totals", {})
+            if not isinstance(totals, dict):
+                totals = {}
             try:
-                actual = float(totals.get("percent_covered", 0.0)) / 100.0
+                raw = totals.get("percent_covered")
+                actual = float(raw) / 100.0
+                valid_coverage = not isinstance(raw, bool) and math.isfinite(actual) and 0 <= actual <= 1
+                if not valid_coverage:
+                    actual = 0.0
             except (TypeError, ValueError):
                 actual = 0.0
             files = coverage_data.get("files", {})
@@ -256,7 +316,7 @@ class ScenarioHarness:
                         missing_files.append(str(path))
         else:
             assumed = True
-            actual = 1.0 if status == "passed" else 0.0
+            actual = 0.0
 
         target = coverage_target
         if target is None:
@@ -264,7 +324,9 @@ class ScenarioHarness:
         if target is None:
             target = 0.0
 
-        passed = actual >= float(target)
+        if not math.isfinite(float(target)) or not 0 <= float(target) <= 1:
+            raise ValueError("coverage_target must be between 0 and 1")
+        passed = valid_coverage and actual >= float(target)
 
         return CoverageMetrics(
             actual=actual,

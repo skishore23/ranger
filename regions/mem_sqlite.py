@@ -5,6 +5,8 @@ Reference implementation of memory region using SQLite for persistence.
 import sqlite3
 import json
 import time
+from dataclasses import asdict
+from topology.attest import create_atom_id
 from contextlib import contextmanager
 from typing import Dict, Any, Iterable, Iterator, List, Optional, Tuple
 
@@ -43,25 +45,38 @@ class MemSQLite:
     def _init_database(self) -> None:
         """Initialize SQLite database with atoms table."""
         with self._connect() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS atoms (
-                    id TEXT PRIMARY KEY,
-                    modality TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    schema TEXT,
-                    facets TEXT NOT NULL,
-                    provenance TEXT NOT NULL,
-                    policy TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    domain TEXT NOT NULL
-                )
-            """)
-            
-            # Create indexes for efficient querying
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_domain ON atoms(domain)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_modality ON atoms(modality)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_created_at ON atoms(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_schema ON atoms(schema)")
+            # DDL and copy are one transaction: failed migrations preserve old rows.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                columns = conn.execute("PRAGMA table_info(atoms)").fetchall()
+                key = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
+                migrate = bool(columns) and key != ["domain", "id"]
+                preserved_sql = []
+                if migrate:
+                    preserved_sql = [row[0] for row in conn.execute(
+                        "SELECT sql FROM sqlite_master WHERE tbl_name='atoms' AND type IN ('index','trigger') AND sql IS NOT NULL")]
+                    if key != ["id"] or {row[1] for row in columns} != {
+                        "id", "modality", "content", "schema", "facets", "provenance", "policy", "created_at", "domain"
+                    }:
+                        raise ValueError("Unsupported atoms schema; refusing destructive migration")
+                    conn.execute("ALTER TABLE atoms RENAME TO atoms_legacy_key")
+                conn.execute("""CREATE TABLE IF NOT EXISTS atoms (
+                    id TEXT NOT NULL, modality TEXT NOT NULL, content TEXT NOT NULL,
+                    schema TEXT, facets TEXT NOT NULL, provenance TEXT NOT NULL,
+                    policy TEXT NOT NULL, created_at INTEGER NOT NULL, domain TEXT NOT NULL,
+                    PRIMARY KEY (domain, id))""")
+                if migrate:
+                    conn.execute("""INSERT INTO atoms (id,modality,content,schema,facets,provenance,policy,created_at,domain)
+                        SELECT id,modality,content,schema,facets,provenance,policy,created_at,domain FROM atoms_legacy_key""")
+                    conn.execute("DROP TABLE atoms_legacy_key")
+                    for sql in preserved_sql:
+                        conn.execute(sql)
+                for column in ("domain", "modality", "created_at", "schema"):
+                    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{column} ON atoms({column})")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -122,25 +137,24 @@ class MemSQLite:
                 where_conditions.append("created_at <= ?")
                 params.append(query["until"])
             
-            # Unit filter
-            if "unit" in query:
-                where_conditions.append("facets LIKE ?")
-                params.append(f'%"unit": "{query["unit"]}"%')
-            
-            # Goal filter
-            if "goal" in query:
-                where_conditions.append("facets LIKE ?")
-                params.append(f'%"goal": "{query["goal"]}"%')
-            
-            # Thread filter
-            if "facets" in query and "thread_id" in query["facets"]:
-                where_conditions.append("facets LIKE ?")
-                params.append(f'%"thread_id": "{query["facets"]["thread_id"]}"%')
-            
+            # json_each compares keys and decoded values exactly, without LIKE wildcards.
+            facets = dict(query.get("facets", {}))
+            for key in ("unit", "goal"):
+                if key in query:
+                    facets[key] = query[key]
+            for key, value in facets.items():
+                if key == "domain":
+                    continue
+                encoded = json.dumps(value, separators=(",", ":"), allow_nan=False)
+                where_conditions.append("""EXISTS (SELECT 1 FROM json_each(atoms.facets) f
+                    WHERE f.key = ? AND f.type = json_type(?) AND f.value IS json_extract(?, '$'))""")
+                params.extend([key, encoded, encoded])
+
             # Build and execute query
             where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
-            order_clause = "ORDER BY created_at DESC"
-            limit_clause = f"LIMIT {query.get('limit', 1000)}"
+            order_clause = "ORDER BY created_at DESC, id ASC"
+            limit_clause = "LIMIT ?"
+            params.append(int(query.get("limit", 1000)))
             
             sql = f"""
                 SELECT id, modality, content, schema, facets, provenance, policy, created_at
@@ -161,6 +175,8 @@ class MemSQLite:
         Args:
             atoms: Atoms to write
         """
+        from core.trace import emit, validate
+        recorded = []
         with self._connect() as conn:
             cursor = conn.cursor()
 
@@ -168,6 +184,9 @@ class MemSQLite:
                 # Prepare atom data
                 facets = dict(atom.facets or {})
                 created_ts = int(facets.get("ts", int(time.time() * 1000)))
+                evidence = {"domain": self.domain, "atom": asdict(atom), "timestamp": created_ts}
+                validate(evidence)
+                recorded.append(evidence)
                 atom_data = (
                     atom.id,
                     atom.modality,
@@ -187,6 +206,8 @@ class MemSQLite:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, atom_data)
             conn.commit()
+        for evidence in recorded:
+            emit("memory_atom", **evidence)
 
     def purge(self, domain: Optional[str] = None) -> None:
         """Remove stored atoms for ``domain`` (defaults to this region's domain)."""
@@ -206,7 +227,7 @@ class MemSQLite:
         Returns:
             Summary atom
         """
-        atom_list = list(atoms)
+        atom_list = sorted(atoms, key=lambda atom: atom.id)
         
         if not atom_list:
             return self._create_empty_summary(goal)
@@ -223,8 +244,8 @@ class MemSQLite:
         summary_content = {
             "total_atoms": len(atom_list),
             "schema_counts": {schema: len(atoms) for schema, atoms in schema_groups.items()},
-            "domains": list(set(atom.facets.get("domain", "unknown") for atom in atom_list)),
-            "modalities": list(set(atom.modality for atom in atom_list)),
+            "domains": sorted(set(atom.facets.get("domain", "unknown") for atom in atom_list)),
+            "modalities": sorted(set(atom.modality for atom in atom_list)),
             "time_range": {
                 "earliest": min(atom.facets.get("ts", 0) for atom in atom_list),
                 "latest": max(atom.facets.get("ts", 0) for atom in atom_list)
@@ -234,14 +255,15 @@ class MemSQLite:
         
         # Create summary atom
         summary_atom = Atom(
-            id=f"summary:{int(time.time() * 1000)}",
+            id=create_atom_id({"summary": summary_content, "sources": [asdict(a) for a in atom_list]},
+                              "memory.summary@v1", {"domain": self.domain, "source": self.key}),
             modality="json",
             content=summary_content,
             schema="memory.summary@v1",
             facets={
                 "domain": self.domain,
                 "source": self.key,
-                "ts": int(time.time() * 1000),
+                "ts": max((a.facets.get("ts", 0) for a in atom_list), default=0),
                 "trust": 0.8,
                 "summary_type": "dense_reducer"
             },
@@ -329,14 +351,15 @@ class MemSQLite:
             Empty summary atom
         """
         return Atom(
-            id=f"empty_summary:{int(time.time() * 1000)}",
+            id=create_atom_id({"total_atoms": 0, "goal": goal}, "memory.summary@v1",
+                              {"domain": self.domain, "source": self.key}),
             modality="json",
             content={"total_atoms": 0, "goal": goal},
             schema="memory.summary@v1",
             facets={
                 "domain": self.domain,
                 "source": self.key,
-                "ts": int(time.time() * 1000),
+                "ts": 0,
                 "trust": 0.5,
                 "summary_type": "empty"
             },

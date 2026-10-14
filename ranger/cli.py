@@ -281,11 +281,11 @@ def trace(
         conditions.append("created_at <= ?")
         params.append(until_ms)
     if unit:
-        conditions.append("facets LIKE ?")
-        params.append(f'%"unit": "{unit}"%')
+        conditions.append("json_extract(facets, '$.unit') = ?")
+        params.append(unit)
     if goal:
-        conditions.append("facets LIKE ?")
-        params.append(f'%"goal": "{goal}"%')
+        conditions.append("json_extract(facets, '$.goal') = ?")
+        params.append(goal)
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     sql = f"""
@@ -358,6 +358,7 @@ def trace(
 @app.command()
 def scenario(
     db_path: Path = typer.Argument(..., exists=True, readable=True, resolve_path=True, help="Path to the SQLite memory database"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Select execution run (default: latest)"),
     domain: Optional[str] = typer.Option(None, "--domain", help="Filter atoms by domain"),
     coverage_target: Optional[float] = typer.Option(None, "--coverage-target", help="Override the inferred coverage target (0-1 range)"),
     timeline: bool = typer.Option(False, "--timeline", help="Render an ASCII timeline of atom emission"),
@@ -365,8 +366,11 @@ def scenario(
 ) -> None:
     """Replay a scenario and assert coverage expectations."""
 
-    harness = ScenarioHarness.from_sqlite(db_path, domain=domain)
-    if not harness.atoms:
+    try:
+        harness = ScenarioHarness.from_sqlite(db_path, domain=domain, run_id=run_id)
+    except (ValueError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not harness.atoms and harness.execution is None:
         typer.secho("No atoms found for the specified filters.", fg=typer.colors.YELLOW)
         raise typer.Exit(code=1)
 
@@ -376,6 +380,8 @@ def scenario(
         typer.echo(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     else:
         typer.secho("Scenario Summary", fg=typer.colors.CYAN)
+        if report.run_id:
+            typer.echo(f"  Run {report.run_id}: {report.status}")
         if report.coverage:
             coverage_pct = report.coverage.actual * 100.0
             target_pct = report.coverage.target * 100.0
@@ -388,7 +394,7 @@ def scenario(
                 typer.echo(
                     "  Missing files: " + ", ".join(sorted(report.coverage.missing_files))
                 )
-        else:
+        elif report.run_id is None:
             typer.secho("  No execution atoms detected.", fg=typer.colors.YELLOW)
 
         if report.goal_blocked:
@@ -410,6 +416,41 @@ def scenario(
 
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def replay(
+    db_path: Path = typer.Argument(..., exists=True, readable=True),
+    run_id: Optional[str] = typer.Option(None, "--run-id"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Reconstruct a recorded run without executing capabilities."""
+    from core.trace import replay_run
+    try:
+        result = replay_run(db_path, run_id)
+    except (ValueError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_output:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        typer.echo(f"Run {result['run_id']}: {result['status']}")
+        typer.echo(json.dumps(result['state'], ensure_ascii=False, indent=2))
+
+
+@app.command()
+def diff(
+    db_path: Path = typer.Argument(..., exists=True, readable=True),
+    left: str = typer.Option(..., "--left"),
+    right: str = typer.Option(..., "--right"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Compare final recorded states of two runs."""
+    from core.trace import diff_runs
+    try:
+        result = diff_runs(db_path, left, right)
+    except (ValueError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @app.command()

@@ -134,9 +134,10 @@ class Plan:
                 lines.append(f"    - {action_id} missing {sorted(missing)}")
         return "\n".join(lines)
 
-    def compile(self, *, budget: Budget | None = None, strict: bool = True) -> Agent:
+    def compile(self, *, budget: Budget | None = None, strict: bool = True,
+                trace_path=".ranger/runs.db", trace: bool = True) -> Agent:
         self.validate(strict=strict)
-        return Agent(list(self.capabilities), budget=budget)
+        return Agent(list(self.capabilities), budget=budget, trace_path=trace_path, trace=trace)
 
 
 def action(

@@ -26,3 +26,4 @@ class SolveResult:
     final: Snapshot
     blocker: Optional[WhyNot] = None
     steps: int = 0
+    run_id: Optional[str] = None

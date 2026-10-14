@@ -374,7 +374,8 @@ def goal(
 class Agent:
     """Topological agent that executes tools to reach goals."""
     
-    def __init__(self, tools: List[Capability], *, budget: Budget | None = None):
+    def __init__(self, tools: List[Capability], *, budget: Budget | None = None,
+                 trace_path=".ranger/runs.db", trace: bool = True):
         """Initialize agent with tools.
         
         Args:
@@ -383,8 +384,14 @@ class Agent:
                 and capability attempts. Defaults: 200000 tokens, 300000 ms, 120 calls.
                 Model requests reserve their estimated prompt size and completion
                 limit; unused reservations are not refunded.
+            trace_path: SQLite evidence database (default .ranger/runs.db relative
+                to the current directory). Each run returns its unique run_id.
+            trace: Disable explicitly for non-JSON state or applications managing
+                their own evidence. Enabled state accepts null, bool, int, finite
+                float, str, list and string-keyed dict only. Recording failures
+                raise and cannot produce a successful SolveResult.
         """
-        self.engine = Engine(tools, budget=budget)
+        self.engine = Engine(tools, budget=budget, trace_path=trace_path, trace=trace)
     
     def run(
         self,

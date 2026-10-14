@@ -20,7 +20,7 @@ def _canonical_payload(content: object, schema: str | None, facets: Dict[str, ob
         "schema": schema,
         "facets": facets,
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def create_atom_id(content: object, schema: str | None, facets: Dict[str, object]) -> str:
@@ -30,35 +30,38 @@ def create_atom_id(content: object, schema: str | None, facets: Dict[str, object
     return f"sha256:{digest}"
 
 
-def sign_atom(atom: Atom, secret_key: str, *, version: str = "v1") -> Atom:
-    """Return a copy of ``atom`` with provenance signature metadata."""
+def _signed_payload(atom: Atom) -> str:
+    from core.trace import dumps
+    return dumps({"id": atom.id, "modality": atom.modality, "content": atom.content,
+                  "schema": atom.schema, "facets": atom.facets, "policy": atom.policy,
+                  "provenance": {k: v for k, v in atom.provenance.items() if k != "sig"}})
 
-    payload = _canonical_payload(atom.content, atom.schema, atom.facets)
-    signature = hmac.new(secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    signed_at = int(time.time() * 1000)
 
-    provenance = dict(atom.provenance or {})
-    provenance.update(
-        {
-            "sig": signature,
-            "signed_at": signed_at,
-            "signature_version": version,
-        }
-    )
+def sign_atom(atom: Atom, secret_key: str, *, version: str = "v2") -> Atom:
+    """Authenticate all fields and provenance except the signature itself.
 
-    return replace(atom, provenance=provenance)
+    Legacy v1 signatures are intentionally not generated or accepted.
+    """
+    if version != "v2":
+        raise ValueError("Only v2 atom signatures are supported")
+    provenance = {**(atom.provenance or {}), "signed_at": int(time.time() * 1000),
+                  "signature_version": version}
+    signed = replace(atom, provenance=provenance)
+    provenance["sig"] = hmac.new(secret_key.encode(), _signed_payload(signed).encode(), hashlib.sha256).hexdigest()
+    return signed
 
 
 def verify_atom(atom: Atom, secret_key: str) -> bool:
-    """Verify a signed atom with ``secret_key``."""
-
-    if not atom.provenance or "sig" not in atom.provenance:
+    if not atom.provenance or atom.provenance.get("signature_version") != "v2":
         return False
-
-    expected = atom.provenance["sig"]
-    payload = _canonical_payload(atom.content, atom.schema, atom.facets)
-    actual = hmac.new(secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-    return hmac.compare_digest(actual, expected)
+    expected = atom.provenance.get("sig")
+    if not isinstance(expected, str):
+        return False
+    try:
+        actual = hmac.new(secret_key.encode(), _signed_payload(atom).encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(actual, expected)
+    except (TypeError, ValueError):
+        return False
 
 
 def verify_atom_chain(atoms: Sequence[Atom], secret_key: str) -> Dict[str, object]:
@@ -69,19 +72,32 @@ def verify_atom_chain(atoms: Sequence[Atom], secret_key: str) -> Dict[str, objec
     seen: set[str] = set()
     chain_integrity = True
 
-    for atom in atoms:
+    has_chain = any("chain_position" in (a.provenance or {}) or "chain_length" in (a.provenance or {}) for a in atoms)
+    for index, atom in enumerate(atoms):
         if not atom.provenance or "sig" not in atom.provenance:
             missing_signatures.append(atom.id)
         elif not verify_atom(atom, secret_key):
             invalid_atoms.append({"atom_id": atom.id, "reason": "invalid_signature"})
 
-        parents = list((atom.provenance or {}).get("parents", []))
+        provenance = atom.provenance or {}
+        parents = provenance.get("parents", [])
+        if not isinstance(parents, list) or any(not isinstance(parent, str) for parent in parents):
+            chain_integrity = False
+            parents = []
+        if atom.id in seen:
+            chain_integrity = False
+        if has_chain and (type(provenance.get("chain_position")) is not int
+                          or type(provenance.get("chain_length")) is not int
+                          or provenance.get("chain_position") != index
+                          or provenance.get("chain_length") != len(atoms)
+                          or parents != [a.id for a in atoms[:index]]):
+            chain_integrity = False
         if any(parent not in seen for parent in parents):
             chain_integrity = False
 
         seen.add(atom.id)
 
-    valid = not invalid_atoms and not missing_signatures and chain_integrity
+    valid = bool(atoms) and not invalid_atoms and not missing_signatures and chain_integrity
     return {
         "valid": valid,
         "invalid_atoms": invalid_atoms,

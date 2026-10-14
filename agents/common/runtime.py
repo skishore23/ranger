@@ -50,9 +50,10 @@ class AgentRuntime:
         options.setdefault("db_path", str(self._db_path))
         options.setdefault("memory_key", self.memory_key)
         options.setdefault("domain", self.memory_domain)
-        options.setdefault("purge", True)
+        options.setdefault("purge", False)
         if guard_regions is not None:
             options.setdefault("guards", list(guard_regions))
+        self._db_path = Path(options["db_path"])
         setup_memory(**options)
 
         self.budget = budget
@@ -62,14 +63,15 @@ class AgentRuntime:
 
         if capability_list is not None:
             resolved_capabilities = list(capability_list)
-            self._agent = Agent(resolved_capabilities, budget=self.budget)
+            self._agent = Agent(resolved_capabilities, budget=self.budget, trace_path=self._db_path)
         elif builder_plan is not None:
-            self._agent = builder_plan.compile(budget=self.budget, strict=True)
+            self._agent = builder_plan.compile(budget=self.budget, strict=True, trace_path=self._db_path)
             resolved_capabilities = list(self._agent.engine.capabilities)
         else:
             resolved_capabilities = list(self.build_capabilities())
-            self._agent = Agent(resolved_capabilities, budget=self.budget)
+            self._agent = Agent(resolved_capabilities, budget=self.budget, trace_path=self._db_path)
 
+        self._agent.engine.trace_domain = self.memory_domain
         self._capability_list = resolved_capabilities
 
         self.configure_runtime()
@@ -135,13 +137,13 @@ class AgentRuntime:
             return Path(choice)
         return self.repo_root / default_name
 
-    def _load_harness(self) -> Optional[ScenarioHarness]:
+    def _load_harness(self, run_id: Optional[str] = None) -> Optional[ScenarioHarness]:
         if not self._db_path.exists():
             return None
-        return ScenarioHarness.from_sqlite(self._db_path, domain=self.memory_domain)
+        return ScenarioHarness.from_sqlite(self._db_path, domain=self.memory_domain, run_id=run_id)
 
-    def scenario_report(self, *, coverage_target: Optional[float] = None) -> ScenarioReport:
-        harness = self._load_harness()
+    def scenario_report(self, *, coverage_target: Optional[float] = None, run_id: Optional[str] = None) -> ScenarioReport:
+        harness = self._load_harness(run_id)
         if harness is None:
             return ScenarioReport(ok=False, coverage=None, goal_blocked=None, atoms=())
         return harness.generate_report(coverage_target=coverage_target)
