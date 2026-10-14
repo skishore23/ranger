@@ -136,6 +136,19 @@ def guard_value(value: Any) -> Any:
     return repaired
 
 
+def guard_request(request):
+    """Protect a complete request without changing its output schema contract.
+
+    Any schema repair is rejected, including annotation changes: distinguishing
+    harmless changes from changes to extension keywords is not generally safe.
+    """
+    original_schema = deepcopy(request.get('schema'))
+    repaired = guard_value(request)
+    if repaired.get('schema') != original_schema:
+        raise GoalBlocked('policy_blocked', {'error': 'guard repair changed output schema contract'})
+    return repaired
+
+
 def validate_max_tokens(value):
     if value is not None and (type(value) is not int or value < 0):
         raise ValueError('max_tokens must be a non-negative integer or None')
@@ -143,7 +156,8 @@ def validate_max_tokens(value):
 
 
 def _generate(call, request):
-    request = guard_value(request)
+    original_schema = deepcopy(request.get('schema'))
+    request = guard_request(request)
     requested = validate_max_tokens(request.get('max_tokens'))
     if requested is not None and requested <= 0:
         raise GoalBlocked('budget', {'dimension': 'tokens'})
@@ -163,8 +177,8 @@ def _generate(call, request):
     finally:
         for state in states:
             state.check_time()
-    if request.get('schema') is not None:
-        validate_response(response, request['schema'])
+    if original_schema is not None:
+        validate_response(response, original_schema)
     return response
 
 

@@ -11,10 +11,11 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from topology.registry import get_region
-from core.execution import protected_generation, generate_with_policy, guard_value, generation_limits, validate_max_tokens
+from core.execution import protected_generation, generate_with_policy, guard_request, generation_limits, validate_max_tokens, validate_response
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,8 @@ class RegionBackedProvider:
         if max_tokens is not None:
             budget.setdefault("max_tokens", max_tokens)
 
-        payload = guard_value(payload)
+        original_schema = deepcopy(schema)
+        payload = guard_request(payload)
 
         def invoke(**request):
             checked_payload = dict(request.get('region_payload', payload))
@@ -120,7 +122,10 @@ class RegionBackedProvider:
                        temperature=payload.get('options', {}).get('temperature'),
                        max_tokens=payload.get('options', {}).get('max_tokens'), schema=payload.get('schema'))
         if getattr(region.infer, '__ranger_protected__', False) is True:
-            return invoke(**request)
+            response = invoke(**request)
+            if original_schema is not None:
+                validate_response(response, original_schema)
+            return response
         from types import SimpleNamespace
         validate_max_tokens(request['max_tokens'])
         request['region_payload'] = payload
@@ -128,7 +133,10 @@ class RegionBackedProvider:
             ceiling = validate_max_tokens(budget['max_tokens'])
             request['max_tokens'] = min(request['max_tokens'], ceiling) if request['max_tokens'] is not None else ceiling
         with generation_limits(budget or None):
-            return generate_with_policy(SimpleNamespace(generate=invoke), **request)
+            response = generate_with_policy(SimpleNamespace(generate=invoke), **request)
+            if original_schema is not None:
+                validate_response(response, original_schema)
+            return response
 
 
     generate.__ranger_protected__ = True

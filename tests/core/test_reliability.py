@@ -385,3 +385,91 @@ def test_region_adapters_reserve_once_and_respect_shared_run_budget():
     request = region._provider.requests[0]
     expected = len(json.dumps({k: v for k, v in request.items() if k != 'max_tokens'}, ensure_ascii=False, sort_keys=True).encode('utf-8')) + 64 + 10
     assert captured == [expected]
+
+
+def test_slow_write_validator_cannot_publish_after_deadline(monkeypatch):
+    import core.execution as execution
+    clock = [0.0]
+    monkeypatch.setattr(execution.time, 'monotonic', lambda: clock[0])
+    def slow(value):
+        clock[0] += 1
+    @step(outputs=['earlier', 'earlier_also'])
+    def first(s):
+        return {'earlier': True, 'earlier_also': True}
+    @step(outputs=['late', 'also_late'], write_specs={'late': WriteSpec(validator=slow)})
+    def late(s):
+        return {'late': True, 'also_late': True}
+    # ExecutionState's dataclass clock factory was bound before monkeypatching.
+    original_state = execution.ExecutionState
+    import core.engine as engine
+    monkeypatch.setattr(engine, 'ExecutionState', lambda budget: original_state(budget, started=clock[0]))
+    result = Agent([first, late], budget=Budget(1000, 10, 2)).run(initial={}, goal=lambda s: s.exists('late'))
+    assert not result.ok
+    assert result.blocker.reason == 'budget'
+    assert result.steps == 1  # Earlier commits in the same batch survive.
+    assert result.final.get('earlier') is True
+    assert result.final.get('earlier_also') is True
+    assert not result.final.exists('late')
+    assert not result.final.exists('also_late')
+    # A standalone workspace has no run deadline imposed on its validators.
+    ws = Workspace()
+    ws.cas_commit({'value': 1}, write_specs={'value': WriteSpec(validator=slow)}, provenance_id='standalone')
+    assert ws.snapshot().get('value') == 1
+
+
+@pytest.mark.parametrize('path', ['direct', 'custom_region', 'standalone_region', 'builtin_adapter'])
+@pytest.mark.parametrize('contract,response', [
+    ({'enum': ['person@example.com']}, '"[EMAIL_REDACTED]"'),
+    ({'const': 'person@example.com'}, '"[EMAIL_REDACTED]"'),
+    ({'type': 'object', 'properties': {'person@example.com': {'type': 'string'}},
+      'required': ['person@example.com'], 'additionalProperties': False}, '{"[EMAIL_REDACTED]": "value"}'),
+])
+def test_guard_repair_cannot_replace_schema_contract(path, contract, response):
+    from copy import deepcopy
+    from core.execution import generate_with_policy
+    from core.llm.provider import RegionBackedProvider
+    register_region(GuardPII('guard'))
+    original = deepcopy(contract)
+    fake = FakeProvider(response)
+    region_requests = []
+    class CustomRegion:
+        kind, key = 'model', 'custom'
+        def infer(self, prompt, window, budget):
+            region_requests.append(prompt)
+            yield Atom('out', 'text', response, None, {}, {}, {})
+    register_region(CustomRegion())
+    region = object.__new__(LLMOpenAI)
+    region.key, region.model, region.system_prompt = 'builtin', 'fake', 'system'
+    region.max_tokens, region.temperature, region._provider = 100, 0, fake
+    register_region(region)
+    @step(outputs=['out'])
+    def invoke(s):
+        if path == 'direct':
+            output = generate_with_policy(fake, prompt='hello', model='fake', schema=contract)
+        elif path == 'standalone_region':
+            output = list(region.infer({'text': 'hello', 'schema': contract}, [], Budget(10000, 1000, 1)))[0].content
+        else:
+            key = 'custom' if path == 'custom_region' else 'builtin'
+            output = RegionBackedProvider(key).generate(prompt='hello', model='fake', schema=contract)
+        return {'out': output}
+    result = Agent([invoke]).run(initial={}, goal=lambda s: s.exists('out'))
+    assert not result.ok
+    assert result.blocker.reason == 'policy_blocked'
+    assert not result.final.exists('out')
+    assert not fake.requests
+    assert not region_requests
+    assert contract == original
+    if path == 'standalone_region':
+        with pytest.raises(GoalBlocked, match='policy_blocked'):
+            list(region.infer({'text': 'hello', 'schema': contract}, [], Budget(10000, 1000, 1)))
+        assert not fake.requests
+
+
+def test_original_schema_copy_survives_provider_mutation():
+    from core.execution import generate_with_policy
+    class MutatingProvider:
+        def generate(self, **request):
+            request['schema']['type'] = 'string'
+            return '"invalid"'
+    with pytest.raises(RuntimeError, match='schema-invalid'):
+        generate_with_policy(MutatingProvider(), prompt='hello', model='fake', schema={'type': 'integer'})

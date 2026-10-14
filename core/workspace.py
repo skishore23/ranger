@@ -1,7 +1,7 @@
 from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Mapping
+from typing import Any, Callable, Dict, Optional, Mapping
 import json
 import hashlib
 from .merge import WriteSpec, validate_value, MergeMode, merge_json_values
@@ -59,7 +59,8 @@ class Workspace:
 
     def cas_commit(self, writes: Dict[FieldKey, Any], *,
                    write_specs: Dict[str, WriteSpec] | None = None,
-                   provenance_id: str) -> Snapshot:
+                   provenance_id: str,
+                   before_publish: Optional[Callable[[], None]] = None) -> Snapshot:
         if write_specs is not None:
             undeclared = set(writes) - set(write_specs)
             if undeclared:
@@ -75,5 +76,10 @@ class Workspace:
                 # Validators cannot retain or mutate the value to be published.
                 validate_value(spec, deepcopy(value))
             staged[key] = Entry(value, cur.version + 1 if cur else 1, provenance_id)
+        # Validators can take arbitrary time. The engine gates publication only
+        # after every value has been staged and validated; standalone callers may
+        # omit the gate. A failed gate leaves all staged writes unpublished.
+        if before_publish is not None:
+            before_publish()
         self._store.update(staged)
         return self.snapshot()

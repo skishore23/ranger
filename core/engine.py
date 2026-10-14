@@ -153,7 +153,8 @@ class Engine:
                 continue
             if writes:
                 prov_id = f'{cap.id}:{rd}:{digest_writes(writes)}'
-                ws.cas_commit(writes, write_specs=cap.write_specs or {}, provenance_id=prov_id)
+                ws.cas_commit(writes, write_specs=cap.write_specs or {}, provenance_id=prov_id,
+                              before_publish=state.check_time if state is not None else None)
             self._last_read_digest[cap.id] = rd
             self._pending.discard(cap.id)
             self._blocked_attempts.pop(cap.id, None)
