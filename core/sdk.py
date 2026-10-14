@@ -17,7 +17,7 @@ from .capability import Capability
 from .engine import Engine
 from .workspace import Snapshot
 from .merge import WriteSpec, MergeMode
-from .errors import SolveResult
+from .errors import SolveResult, GoalCheck
 from .runners.python_runner import PythonRunner
 from .runners.llm_runner import LLMRunner
 from .runners.human_runner import HumanRunner
@@ -375,7 +375,8 @@ class Agent:
     """Topological agent that executes tools to reach goals."""
     
     def __init__(self, tools: List[Capability], *, budget: Budget | None = None,
-                 trace_path=".ranger/runs.db", trace: bool = True):
+                 trace_path=".ranger/runs.db", trace: bool = True,
+                 strict_contracts: bool = False):
         """Initialize agent with tools.
         
         Args:
@@ -390,21 +391,24 @@ class Agent:
                 their own evidence. Enabled state accepts null, bool, int, finite
                 float, str, list and string-keyed dict only. Recording failures
                 raise and cannot produce a successful SolveResult.
+            strict_contracts: Limit capability snapshots to declared inputs and
+                raise ContractViolation on undeclared reads. Off for compatibility.
         """
-        self.engine = Engine(tools, budget=budget, trace_path=trace_path, trace=trace)
+        self.engine = Engine(tools, budget=budget, trace_path=trace_path, trace=trace,
+                             strict_contracts=strict_contracts)
     
     def run(
         self,
         *,
         initial: Dict[str, Any],
-        goal: Callable[[Snapshot], bool],
+        goal: Callable[[Snapshot], bool | GoalCheck],
         max_steps: int = 60,
     ) -> SolveResult:
         """Run the agent to achieve the goal.
         
         Args:
             initial: Initial workspace state
-            goal: Function that returns True when goal is achieved
+            goal: Function returning bool or GoalCheck with named unmet requirements
             max_steps: Maximum serial batches. Compatible capabilities within a batch
                 read the same selected snapshot. Synchronous work cannot be preempted;
                 elapsed limits are checked before and after execution.

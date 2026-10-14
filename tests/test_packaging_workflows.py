@@ -125,3 +125,37 @@ def test_installed_readme_replay_diff_and_scaffold(installed):
     scaffold = json.loads(command([cli, "replay", ".ranger/runs.db", "--run-id", run_id, "--json"], outside))
     assert scaffold["status"] == "succeeded"
     assert scaffold["state"]["demo_agent.message"].startswith("Ready to build with Ranger")
+
+
+def test_installed_contracts_and_explanations(installed):
+    python, cli, outside, source, mode = installed
+    script = outside / 'contracts.py'
+    script.write_text('''from core.sdk import Agent, GoalCheck, step
+from core.errors import ContractViolation
+
+@step(outputs=['done'], name='hidden-read')
+def hidden(state):
+    return {'done': state['secret']}
+
+try:
+    Agent([hidden], strict_contracts=True, trace=False).run(
+        initial={'secret': 3}, goal=lambda s: s.exists('done'))
+except ContractViolation as exc:
+    assert exc.keys == ('secret',)
+else:
+    raise AssertionError('hidden state read was allowed')
+
+@step(inputs=['required'], outputs=['done'], name='waiting')
+def waiting(state):
+    raise AssertionError('missing inputs must prevent execution')
+
+result = Agent([waiting], strict_contracts=True, trace_path='.ranger/contracts.db').run(
+    initial={}, goal=lambda s: GoalCheck(met=False, unmet=['need verified output']))
+assert not result.ok
+print(result.run_id)
+''')
+    run_id = command([python, script], outside).strip()
+    explained = json.loads(command([cli, 'explain', '.ranger/contracts.db',
+                                    '--run-id', run_id, '--json'], outside))
+    assert explained['goal']['unmet'] == ['need verified output']
+    assert explained['schedules'][0]['capabilities'][0]['missing'] == ['required']

@@ -146,7 +146,9 @@ def replay_run(db_path, run_id=None) -> dict:
     last_goal = None
     previous_elapsed = -1
     previous_kind = None
-    allowed = {'initial', 'goal', 'capability_started', 'capability_finished', 'commit', 'memory_atom', 'outcome'}
+    current_schedule = None
+    schedule_index = 0
+    allowed = {'initial', 'goal', 'schedule', 'capability_started', 'capability_finished', 'commit', 'memory_atom', 'outcome'}
     for index, event in enumerate(events):
         try:
             payload = json.loads(event['payload'], object_pairs_hook=_unique_object)
@@ -165,6 +167,11 @@ def replay_run(db_path, run_id=None) -> dict:
             if active_capability is not None or not isinstance(payload.get('capability'), str):
                 raise ValueError('Malformed capability start')
             active_capability = payload['capability']
+            if current_schedule is not None:
+                selected = current_schedule['selected']
+                if schedule_index >= len(selected) or active_capability != selected[schedule_index]:
+                    raise ValueError('Capability contradicts scheduling evidence')
+                schedule_index += 1
         if kind in {'commit', 'capability_finished'}:
             if active_capability is None or payload.get('capability') != active_capability:
                 raise ValueError('Malformed capability event order')
@@ -197,17 +204,37 @@ def replay_run(db_path, run_id=None) -> dict:
                     raise ValueError('Inconsistent committed state')
             state = snapshot
         if kind == 'goal':
+            if current_schedule is not None and schedule_index != len(current_schedule['selected']):
+                raise ValueError('Goal checked before scheduled work completed')
             status, step = payload.get('status'), payload.get('step')
             if status not in {'met', 'unmet', 'blocked', 'failed'} or type(step) is not int or step < 0:
                 raise ValueError('Malformed goal evidence')
             if last_goal is not None and step <= last_goal['step']:
                 raise ValueError('Non-increasing goal step')
+            for field in ('missing', 'unmet'):
+                if field in payload and (not isinstance(payload[field], list)
+                        or any(not isinstance(item, str) or not item for item in payload[field])):
+                    raise ValueError('Malformed goal requirements')
+            if status == 'met' and (payload.get('missing') or payload.get('unmet')):
+                raise ValueError('Met goal has unmet requirements')
+            current_schedule = None
+            schedule_index = 0
             last_goal = {'status': status, 'step': step, 'state': dumps(state)}
             if status == 'met':
                 # A met goal ends solve; a late deadline can still block its outcome.
                 required_outcomes = {'succeeded', 'blocked', 'failed'}
             elif status in {'blocked', 'failed'}:
                 required_outcomes = {status}
+        if kind == 'schedule':
+            from .explain import validate_schedule
+            if (active_capability is not None or previous_kind != 'goal' or last_goal is None
+                    or last_goal['status'] != 'unmet' or payload.get('step') != last_goal['step']):
+                raise ValueError('Malformed scheduling event order')
+            validate_schedule(payload)
+            current_schedule = payload
+            schedule_index = 0
+            if payload['stop'] is not None or not payload['selected']:
+                required_outcomes = {'blocked', 'failed'}
         if kind == 'capability_started' and not isinstance(payload.get('capability'), str):
             raise ValueError('Malformed capability evidence')
         if kind == 'capability_finished' and (not isinstance(payload.get('capability'), str) or payload.get('status') not in {'succeeded', 'blocked', 'failed', 'retry'}):

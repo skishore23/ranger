@@ -54,7 +54,10 @@ class HumanRunner:
             print(f"Description: {self.description}")
             print(f"   {self.description}")
 
-        if self.write_keys and all(snap.exists(key) for key in self.write_keys):
+        # Strict snapshots expose only declared inputs. Do not implicitly read
+        # undeclared output keys before invoking the user's callback.
+        available = set(snap.data) if self.write_keys else set()
+        if self.write_keys and all(key in available for key in self.write_keys):
             print("   Existing values detected; skipping human input.")
             return {}
 

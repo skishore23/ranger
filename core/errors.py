@@ -2,6 +2,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Set, Dict, Any
 from .workspace import Snapshot
+from .contracts import ContractViolation
+
+
+@dataclass(frozen=True)
+class GoalCheck:
+    """Optional goal result with named requirements that remain unmet."""
+    met: bool
+    unmet: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if type(self.met) is not bool:
+            raise TypeError('GoalCheck.met must be a bool')
+        if isinstance(self.unmet, str):
+            raise TypeError('GoalCheck.unmet must contain non-empty strings')
+        unmet = tuple(self.unmet)
+        if not all(isinstance(item, str) and item for item in unmet):
+            raise TypeError('GoalCheck.unmet must contain non-empty strings')
+        object.__setattr__(self, 'unmet', unmet)
+        if self.met and self.unmet:
+            raise ValueError('A met goal cannot have unmet requirements')
+
+    def __bool__(self):
+        return self.met
 
 
 class GoalBlocked(Exception):

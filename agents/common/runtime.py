@@ -36,6 +36,7 @@ class AgentRuntime:
         guard_regions: Optional[Iterable] = None,
         memory_kwargs: Optional[Dict[str, Any]] = None,
         auto_visualize: Union[bool, str, Path, None] = None,
+        strict_contracts: bool = False,
     ) -> None:
         self._repo_root = Path(repo_root or Path.cwd()).resolve()
         self.memory_key = memory_key
@@ -66,13 +67,16 @@ class AgentRuntime:
 
         if capability_list is not None:
             resolved_capabilities = list(capability_list)
-            self._agent = Agent(resolved_capabilities, budget=self.budget, trace_path=self._db_path)
+            self._agent = Agent(resolved_capabilities, budget=self.budget, trace_path=self._db_path,
+                                strict_contracts=strict_contracts)
         elif builder_plan is not None:
-            self._agent = builder_plan.compile(budget=self.budget, strict=True, trace_path=self._db_path)
+            self._agent = builder_plan.compile(budget=self.budget, strict=True, trace_path=self._db_path,
+                                               strict_contracts=strict_contracts)
             resolved_capabilities = list(self._agent.engine.capabilities)
         else:
             resolved_capabilities = list(self.build_capabilities())
-            self._agent = Agent(resolved_capabilities, budget=self.budget, trace_path=self._db_path)
+            self._agent = Agent(resolved_capabilities, budget=self.budget, trace_path=self._db_path,
+                                strict_contracts=strict_contracts)
 
         self._agent.engine.trace_domain = self.memory_domain
         self._capability_list = resolved_capabilities

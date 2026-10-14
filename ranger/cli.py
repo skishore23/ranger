@@ -451,6 +451,53 @@ def replay(
 
 
 @app.command()
+def explain(
+    db_path: Path = typer.Argument(..., exists=True, readable=True),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Select run (default: latest)"),
+    json_output: bool = typer.Option(False, "--json", help="Emit recorded scheduling decisions as JSON"),
+) -> None:
+    """Explain recorded scheduling decisions without rerunning tools or goals."""
+    from core.explain import explain_run
+    try:
+        report = explain_run(db_path, run_id)
+    except (ValueError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_output:
+        typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"Run {report['run_id']}: {report['status']}")
+    for schedule in report['schedules']:
+        typer.echo(f"Step {schedule['step']}:")
+        if schedule['stop']:
+            typer.echo(f"  Execution stopped: {schedule['stop']['reason']} {schedule['stop']['details']}")
+        for row in schedule['capabilities']:
+            details = []
+            if row['missing']:
+                details.append('missing=' + ', '.join(row['missing']))
+            for conflict in row['conflicts']:
+                details.append(f"conflicts with {conflict['capability']} on {', '.join(conflict['keys'])}")
+            if row['attempts']:
+                details.append(f"failed attempts={row['attempts']}")
+            suffix = f" ({'; '.join(details)})" if details else ''
+            typer.echo(f"  {row['capability']}: {row['status']} — {row['reason']}{suffix}")
+    if not report['schedules']:
+        typer.echo('No scheduling decisions recorded; the initial goal may have been met or this is an older log.')
+    checked = report['goal']
+    if checked:
+        typer.echo(f"Final goal: {checked['status']}")
+        if checked.get('missing'):
+            typer.echo('  Missing goal keys: ' + ', '.join(checked['missing']))
+        for requirement in checked.get('unmet', []):
+            typer.echo(f"  Unmet: {requirement}")
+        if checked.get('reason') or checked.get('error'):
+            typer.echo(f"  {checked.get('reason') or checked.get('error')}")
+    if report['blocker']:
+        typer.echo(f"Run blocked: {report['blocker']['reason']}")
+    if report['error']:
+        typer.echo(f"Run failed: {report['error']['type']}: {report['error']['message']}")
+
+
+@app.command()
 def diff(
     db_path: Path = typer.Argument(..., exists=True, readable=True),
     left: str = typer.Option(..., "--left"),

@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .workspace import Workspace, Snapshot
 from .trace import Recorder, recording, emit, validate, values as snapshot_values
 from .capability import Capability
-from .errors import GoalBlocked, SolveResult, WhyNot
+from .errors import GoalBlocked, GoalCheck, SolveResult, WhyNot, ContractViolation
 from .provenance import digest_writes
 from .execution import ExecutionState, execution_scope, current_execution, guard_atoms, guard_value, selected_snapshot_scope
 from topology import plan_path, summarize_regions, reconcile_overlaps, pack_context
@@ -25,14 +25,39 @@ def _digest_reads(cap: Capability, snap: Snapshot) -> str:
 class Engine:
     """Serial execution of stable batches with no declared read/write hazards."""
     def __init__(self, capabilities: List[Capability], budget: Optional[Budget] = None, *,
-                 trace_path=".ranger/runs.db", trace: bool = False):
+                 trace_path=".ranger/runs.db", trace: bool = False,
+                 strict_contracts: bool = False):
         self.trace_domain = None
         self.trace_path = trace_path
         self.trace = trace
-        self.capabilities = capabilities
+        if type(strict_contracts) is not bool:
+            raise TypeError('strict_contracts must be a bool')
+        self.strict_contracts = strict_contracts
+        self.capabilities = list(capabilities)
+        self._prepare_capabilities()
         # Enough for multi-target reference workflows; limits remain finite.
         self.budget = budget if budget is not None else Budget(tokens=200000, ms=300000, calls=120)
         self._reset_run()
+
+    def _prepare_capabilities(self):
+        """Validate registrations and capture stable, independently owned keys."""
+        identifiers = set()
+        for cap in self.capabilities:
+            if not isinstance(cap, Capability):
+                raise TypeError('Every registered capability must be a Capability')
+            if not isinstance(cap.id, str) or not cap.id.strip():
+                raise ValueError('Capability IDs must be non-empty strings')
+            if cap.id in identifiers:
+                raise ValueError(f'Duplicate capability ID: {cap.id}')
+            identifiers.add(cap.id)
+            for attribute in ('reads', 'writes'):
+                keys = getattr(cap, attribute)
+                if not isinstance(keys, (set, frozenset)) or any(not isinstance(k, str) or not k for k in keys):
+                    raise ValueError(f'Capability {cap.id} {attribute} must be a set of non-empty strings')
+        self.capabilities = [replace(cap, reads=frozenset(cap.reads), writes=frozenset(cap.writes),
+                                     tags=frozenset(cap.tags) if cap.tags is not None else None,
+                                     write_specs=dict(cap.write_specs) if cap.write_specs is not None else None)
+                             for cap in self.capabilities]
 
     def _reset_run(self):
         self._last_read_digest: Dict[str, str] = {}
@@ -43,8 +68,9 @@ class Engine:
         self._execution_recency: Dict[str, int] = {}
         self._execution_sequence = 0
 
-    def solve(self, *, initial: Dict[str, Any], goal: Callable[[Snapshot], bool],
+    def solve(self, *, initial: Dict[str, Any], goal: Callable[[Snapshot], bool | GoalCheck],
               max_steps: int = 60) -> SolveResult:
+        self._prepare_capabilities()
         self._reset_run()
         ws = Workspace(initial)
         state = ExecutionState(replace(self.budget))
@@ -71,12 +97,17 @@ class Engine:
     def _solve(self, ws, goal, max_steps, state):
         snap = ws.snapshot()
         seen = {snap.digest()}
+        stalled = False
         for step in range(max(0, max_steps) + 1):
             # Includes the initial state at zero allowance and the final batch.
             scope = getattr(goal, '__ranger_goal_scope__', set())
             try:
-                goal_met = bool(not any(not snap.exists(k) for k in scope) and goal(snap))
-                emit('goal', status='met' if goal_met else 'unmet', step=step, name=getattr(goal, '__name__', type(goal).__name__))
+                missing = sorted(k for k in scope if not snap.exists(k))
+                checked = False if missing else goal(snap)
+                goal_met = bool(checked)
+                goal_details = {'missing': missing, 'unmet': list(checked.unmet) if isinstance(checked, GoalCheck) else []}
+                emit('goal', status='met' if goal_met else 'unmet', step=step,
+                     name=getattr(goal, '__name__', type(goal).__name__), **goal_details)
             except GoalBlocked as blocked:
                 emit('goal', status='blocked', step=step, name=getattr(goal, '__name__', type(goal).__name__), reason=blocked.reason)
                 return SolveResult(False, snap, WhyNot('goal_blocked', details={
@@ -92,22 +123,37 @@ class Engine:
                     except GoalBlocked as blocked:
                         return SolveResult(False, snap, WhyNot('budget', details=blocked.details), step)
                 return SolveResult(True, snap, steps=step)
-            if step >= max_steps:
-                return SolveResult(False, snap, WhyNot('budget', details={'steps': max_steps}), step)
-            try:
-                state.check_execution()
-            except GoalBlocked as blocked:
-                return SolveResult(False, snap, WhyNot('budget', details=blocked.details), step)
-            exhausted = next((key for key in self._pending if self._blocked_attempts.get(key, 0) >= 3), None)
-            if exhausted:
-                return SolveResult(False, snap, WhyNot('llm_blocked', details={
-                    'capability': exhausted, 'attempts': self._blocked_attempts[exhausted]}), step)
+            stop = None
+            blocker = None
+            if stalled:
+                stop = {'reason': 'no_progress', 'details': {}}
+                blocker = WhyNot('no_progress')
+            elif step >= max_steps:
+                stop = {'reason': 'step_limit', 'details': {'steps': max_steps}}
+                blocker = WhyNot('budget', details=stop['details'])
+            else:
+                try:
+                    state.check_execution()
+                except GoalBlocked as blocked:
+                    stop = {'reason': 'budget', 'details': blocked.details}
+                    blocker = WhyNot('budget', details=blocked.details)
+                if stop is None:
+                    exhausted = next((key for key in sorted(self._pending) if self._blocked_attempts.get(key, 0) >= 3), None)
+                    if exhausted:
+                        details = {'capability': exhausted, 'attempts': self._blocked_attempts[exhausted]}
+                        stop = {'reason': 'retries_exhausted', 'details': details}
+                        blocker = WhyNot('llm_blocked', details=details)
             ready = self._find_ready(snap)
-            if not ready:
-                return SolveResult(False, snap, WhyNot('no_ready', missing=self._missing_for(goal, snap)), step)
             plan = self._pick_compatible(ready)
+            schedule = self._schedule_report(snap, ready, plan, step, stop)
+            emit('schedule', **schedule)
+            diagnostics = {'goal': goal_details, 'schedule': schedule}
+            if blocker is not None:
+                return SolveResult(False, snap, replace(blocker, details={**(blocker.details or {}), **diagnostics}), step)
+            if not ready:
+                return SolveResult(False, snap, WhyNot('no_ready', missing=set(missing), details=diagnostics), step)
             if not plan:
-                return SolveResult(False, snap, WhyNot('conflict', details={'ready': [c.id for c in ready]}), step)
+                return SolveResult(False, snap, WhyNot('conflict', details={'ready': [c.id for c in ready], **diagnostics}), step)
             try:
                 snap = self._apply_batch(ws, plan, snap, goal)
                 state.check_time()
@@ -115,9 +161,36 @@ class Engine:
                 # Preserve earlier successful commits in a partially executed batch.
                 return SolveResult(False, ws.snapshot(), WhyNot(blocked.reason, details=blocked.details), step + 1)
             digest = snap.digest()
-            if digest in seen and not self._pending and not self._find_ready(snap):
-                return SolveResult(False, snap, WhyNot('no_progress'), step + 1)
+            # Evaluate the final goal and explain the final snapshot before
+            # reporting a successful no-op as no progress.
+            stalled = digest in seen and not self._pending and not self._find_ready(snap)
             seen.add(digest)
+
+    def _schedule_report(self, snap, ready, plan, step, stop):
+        ready_ids = {cap.id for cap in ready}
+        selected_ids = {cap.id for cap in plan}
+        decisions = []
+        for cap in sorted(self.capabilities, key=lambda c: c.id):
+            missing = sorted(key for key in cap.reads if not snap.exists(key))
+            row = {'capability': cap.id, 'status': 'idle', 'reason': 'inputs_unchanged',
+                   'missing': missing, 'conflicts': [], 'attempts': self._blocked_attempts.get(cap.id, 0)}
+            if missing:
+                row.update(status='waiting', reason='missing_inputs')
+            elif cap.id in ready_ids:
+                reason = ('retry_pending' if cap.id in self._pending else
+                          'never_run' if cap.id not in self._last_read_digest else 'inputs_changed')
+                row.update(status='selected', reason=reason)
+                if stop is not None:
+                    row.update(status='blocked', reason=stop['reason'])
+                elif cap.id not in selected_ids:
+                    row.update(status='deferred', reason='conflict')
+                    for chosen in plan:
+                        keys = (cap.writes & (chosen.reads | chosen.writes)) | (cap.reads & chosen.writes)
+                        if keys:
+                            row['conflicts'].append({'capability': chosen.id, 'keys': sorted(keys)})
+            decisions.append(row)
+        return {'step': step, 'selected': [] if stop is not None else [cap.id for cap in plan],
+                'capabilities': decisions, 'stop': stop}
 
     def _find_ready(self, snap: Snapshot) -> List[Capability]:
         ready = []
@@ -171,17 +244,33 @@ class Engine:
                         selected = Snapshot({k: replace(entry, value=values[k]) for k, entry in entries.items()})
                     if state is not None:
                         state.check_time()
-                    try:
-                        with selected_snapshot_scope(snap):
-                            writes = cap.runner.run(cap, selected, context=context) or {}
-                    finally:
+                    original = snap
+                    if self.strict_contracts:
+                        selected = selected.with_read_contract(cap.id, cap.reads)
+                        original = snap.with_read_contract(cap.id, cap.reads)
+                    with selected_snapshot_scope(original):
+                        try:
+                            writes = cap.runner.run(cap, selected, context=context)
+                        finally:
+                            if state is not None:
+                                state.check_time()
+                        if writes is None:
+                            writes = {}
+                        if not isinstance(writes, dict):
+                            raise TypeError(f'Capability {cap.id} must return dict or None')
+                        illegal = set(writes) - cap.writes
+                        if illegal:
+                            raise ContractViolation(cap.id, 'writes', illegal)
+                        if writes and cap.post is not None:
+                            if not cap.post(selected, writes):
+                                raise RuntimeError(f'verify_failed: {cap.id}')
+                            # Postconditions may mutate the proposed dict; check
+                            # the final proposal before publishing any values.
+                            illegal = set(writes) - cap.writes
+                            if illegal:
+                                raise ContractViolation(cap.id, 'writes', illegal)
                         if state is not None:
                             state.check_time()
-                    if writes and cap.post is not None:
-                        if not cap.post(selected, writes):
-                            raise RuntimeError(f'verify_failed: {cap.id}')
-                    if state is not None:
-                        state.check_time()
                 except GoalBlocked as blocked:
                     if blocked.reason not in soft:
                         raise

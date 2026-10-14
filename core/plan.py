@@ -135,9 +135,11 @@ class Plan:
         return "\n".join(lines)
 
     def compile(self, *, budget: Budget | None = None, strict: bool = True,
-                trace_path=".ranger/runs.db", trace: bool = True) -> Agent:
+                trace_path=".ranger/runs.db", trace: bool = True,
+                strict_contracts: bool = False) -> Agent:
         self.validate(strict=strict)
-        return Agent(list(self.capabilities), budget=budget, trace_path=trace_path, trace=trace)
+        return Agent(list(self.capabilities), budget=budget, trace_path=trace_path, trace=trace,
+                     strict_contracts=strict_contracts)
 
 
 def action(

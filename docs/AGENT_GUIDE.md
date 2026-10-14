@@ -17,13 +17,17 @@ def double(state):
 def done(state):
     return state.get("c") == 4
 
-result = Agent([increment, double], trace_path=".ranger/demo.db").run(
+result = Agent([increment, double], strict_contracts=True, trace_path=".ranger/demo.db").run(
     initial={"a": 1}, goal=done)
 assert result.ok and result.final["c"] == 4
 print(result.run_id)
 ```
 
 Snapshot access via `state[key]`, `get`, `value`, `exists`, membership and `data` exports defensive values. Functions return declared writes; returning `{}` consumes the current inputs without producing outputs. Use `@step` for pure computation and `@tool` for filesystem/HTTP actions. Declarations are scheduling contracts, not a Python sandbox.
+
+With `strict_contracts=True`, capability snapshots contain only declared inputs and explicit undeclared reads raise `ContractViolation`. Declare presence/default lookups too; seed optional inputs with None. IDs must be unique, and the engine captures independent immutable read/write key sets so caller or runner mutations cannot change the scheduled contract. Postconditions use their scoped snapshot and cannot add undeclared writes. Existing workflows can leave strict reads disabled while correcting their declarations.
+
+After recording a run, `ranger explain .ranger/demo.db` shows why each capability ran or stayed idle; `--run-id ID --json` selects a run and returns machine-readable decisions. Boolean goals remain valid. Return `GoalCheck(met=False, unmet=["required check must pass"])` from `core.sdk` when a goal should explain its unfinished requirements.
 
 `Agent` records strict JSON evidence automatically. Replay reconstructs state without executing tools or models. Use `ranger replay .ranger/demo.db --json` to inspect the example. Default recording is `.ranger/runs.db`; explicit `trace=False` permits non-JSON Python state. Recording errors remain visible but cannot undo external effects.
 

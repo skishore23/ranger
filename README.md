@@ -27,7 +27,7 @@ The distribution includes `core`, `ranger`, `agents`, `regions`, `topology` and 
 
 State is a key–value map. `Snapshot` supports `snapshot[key]`, membership, `get`, `value`, `exists` and `data`. Reads export defensive copies: mutating a retrieved list cannot change the workspace or its history.
 
-A capability becomes ready when its declared inputs exist and it has never consumed those input values, or those values change. Missing outputs can make a capability ready; a successful empty write or `SkipLLM` consumes its inputs so it does not spin until something changes. Failed refreshes remain retryable.
+A capability becomes ready when its declared inputs exist and it has never consumed those input values, or those values change. A successful empty write or `SkipLLM` consumes its inputs so it does not spin until something changes. Missing outputs alone do not force reruns. Failed refreshes remain retryable.
 
 The scheduler uses deterministic execution recency, compute priority and capability ID. Batches exclude write/write and cross-capability read/write conflicts. **Execution is serial**; compatible capabilities read the same selected snapshot. Each capability's complete merged write set is validated and published atomically. Earlier successful capability commits can remain when a later capability blocks.
 
@@ -43,6 +43,8 @@ flowchart TD
 ```
 
 `@step` describes pure computation; `@tool` describes actions with side effects; `@llm` runs a provider with optional JSON Schema validation; `@human` collects responses; `@goal` checks completion. These declarations help scheduling and policy enforcement. Python purity and isolation are caller responsibilities.
+
+Capability IDs must be unique within an agent. Invalid IDs/declarations are rejected before execution, and every runner's writes are checked against its declared outputs. Enable `Agent(..., strict_contracts=True)` to reject undeclared state reads as well. Strict capability snapshots expose only declared inputs through `data` and `digest`; explicit undeclared access via indexing, `get`, `value`, `exists`, membership or the exported entry mapping raises `ContractViolation`. This also applies to model mappers, human callbacks, custom runners and postconditions. Presence checks count as reads: declare and seed optional inputs (for example with `None`). Goals still inspect the complete snapshot. Strict mode checks public state access, not arbitrary Python or external dependencies, and is opt-in for existing workflows.
 
 ## Hello, Ranger (no LLMs)
 
@@ -64,7 +66,7 @@ def done(state):
     return state.get("c") == 4
 
 if __name__ == "__main__":
-    agent = Agent([inc, double], trace_path=".ranger/demo.db")
+    agent = Agent([inc, double], strict_contracts=True, trace_path=".ranger/demo.db")
     result = agent.run(initial={"a": 1}, goal=done, max_steps=10)
     assert result.ok, result
     print("Final c:", result.final["c"])
@@ -161,12 +163,18 @@ Execution logs include initial state, ordered capability statuses/timings, commi
 python hello.py
 ranger replay .ranger/demo.db --json
 ranger scenario .ranger/demo.db --json
+ranger explain .ranger/demo.db
+ranger explain .ranger/demo.db --run-id RUN_ID --json
 # Use the printed IDs from two executions of hello.py:
 ranger replay .ranger/demo.db --run-id RUN_ID --json
 ranger diff .ranger/demo.db --left FIRST_RUN_ID --right SECOND_RUN_ID --json
 ```
 
 Replay structurally validates evidence and rejects malformed records. Scenario success requires a recorded successful outcome; missing, failed and incomplete evidence cannot certify success. Legacy testwriter scenarios require successful execution plus actual sufficient coverage. SQLite logs remain local mutable data, not tamper-proof audit records. Recording errors raise visibly, but cannot undo prior external effects or already published workspace writes.
+
+`ranger explain` shows the decisions recorded before each attempted batch: selected capabilities, missing inputs, unchanged inputs, conflicts with selected capabilities, pending retries and execution limits. It reads evidence without importing or rerunning workflow code. Older logs remain replayable but cannot supply decisions they never recorded; an initially satisfied goal also has no schedule. Scheduling records contain capability/key names and reasons, not input values. For runs with `trace=False`, terminal scheduling blockers include the latest report in `result.blocker.details`.
+
+Boolean goals remain supported. A goal can optionally return `GoalCheck(met=False, unmet=["tests must pass", "coverage target must be reached"])` from `core.sdk` to record named unmet requirements; use `GoalCheck(met=True)` once they hold. The engine also records missing scope keys. These messages are supplied by the application; Ranger does not infer an explanation from arbitrary Python predicates.
 
 Trace state must use JSON `null`/`None`, booleans, integers, finite floats, strings, lists and string-keyed dictionaries. Tuples, sets, custom objects, circular structures and nonfinite numbers raise rather than being converted to strings. Use `trace=False` when your application needs arbitrary Python state.
 
