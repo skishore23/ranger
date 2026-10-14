@@ -1,46 +1,56 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import pytest
-
-from core.errors import GoalBlocked
-
 from agents.deep_research.agent import DeepResearchAgent
-from agents.deep_research.firecrawl import get_api_key
 from agents.deep_research.types import DeepResearchConfig
 
 
-def test_deep_research_agent_offline(tmp_path: Path) -> None:
-    if not get_api_key():
-        pytest.skip("FIRECRAWL_KEY required for deep research agent test")
-
-    config = DeepResearchConfig(
-        desired_length_pages=2,
-        min_citations=5,
-        require_human_feedback=False,
-    )
+def _offline_agent(tmp_path, monkeypatch, *, require_review=False):
+    import json
+    from agents.deep_research import capabilities
+    from core.llm.provider import register_llm_profile
+    from tests.test_reference_agent_reliability import meaningful_report
+    config = DeepResearchConfig(desired_length_pages=1, min_citations=1,
+                                require_human_feedback=require_review,
+                                output_path=tmp_path / 'report.md')
     agent = DeepResearchAgent(repo_root=tmp_path, topic="Quantum computing impact", config=config)
-    try:
-        result = agent.run(max_steps=80)
-    except GoalBlocked as exc:
-        pytest.skip(f"Deep research blocked: {exc.reason}")
+    class Provider:
+        def generate(self, **request):
+            schema = request.get('schema') or {}
+            properties = schema.get('properties', {})
+            if 'queries' in properties:
+                result = {'executive_summary': 'Investigate quantum computing', 'research_questions': ['What changed?'], 'sections': [{'title': 'Analysis'}], 'queries': ['quantum']}
+            elif 'key_findings' in properties:
+                result = {'key_findings': ['Quantum computing evidence'], 'statistics': [{'metric': 'observations', 'value': '1', 'source': 'https://example.org/a'}]}
+            else:
+                result = {'draft': 'Quantum computing impact\n\n' + meaningful_report(), 'citations': [{'label': 'A', 'title': 'Evidence', 'url': 'https://example.org/a'}]}
+            return json.dumps(result)
+    for stage in ['plan', 'notes', 'draft']:
+        register_llm_profile('deepresearch.' + stage, provider=Provider(), defaults={'model': 'stub', 'max_tokens': 7000})
+    monkeypatch.setattr(capabilities, 'get_api_key', lambda: 'offline')
+    monkeypatch.setattr(capabilities, 'fetch_sources', lambda *a, **k: [{'title': 'Evidence', 'url': 'https://example.org/a', 'snippet': 'Quantum computing evidence', 'content': 'A retrieved finding'}])
+    return agent
 
-    if not result.ok:
-        blocker = result.blocker.reason if result.blocker else "unknown"
-        pytest.skip(f"Deep research run did not complete: {blocker}")
 
-    final = result.final
-    assert final.exists("research.report")
-    report = final.value("research.report")
-    assert "Quantum computing" in report
-    citations = final.value("research.citations")
-    assert isinstance(citations, list)
-    assert len(citations) >= 5
-    if final.exists("research.summary"):
-        summary = final.value("research.summary")
-        assert summary["approx_pages"] >= 2
+def test_deep_research_agent_offline(tmp_path: Path, monkeypatch) -> None:
+    agent = _offline_agent(tmp_path, monkeypatch)
+    result = agent.run(max_steps=80)
+    assert result.ok, result.blocker
+    assert 'Quantum computing' in result.final.get('research.report')
+    assert result.final.get('research.summary')['citations'] == 1
+    assert (tmp_path / 'report.md').exists()
+    assert agent.scenario_report(run_id=result.run_id).ok
+
+
+def test_required_review_public_run_waits_offline(tmp_path, monkeypatch):
+    agent = _offline_agent(tmp_path, monkeypatch, require_review=True)
+    result = agent.run(max_steps=80)
+    assert not result.ok
+    assert result.blocker.reason == 'human_feedback_required'
+    assert not result.final.exists('research.report')
+    assert not (tmp_path / 'report.md').exists()
+    assert not agent.scenario_report(run_id=result.run_id).ok
 
 
 def test_deep_research_visualize_stub(tmp_path: Path) -> None:

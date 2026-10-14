@@ -77,7 +77,7 @@ def ensure_memory_ready() -> None:
 
 
 def get_default_budget() -> Budget:
-    return Budget(tokens=8000, ms=60000, calls=12)
+    return Budget(tokens=200000, ms=300000, calls=120)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation only

@@ -99,7 +99,7 @@ class TestWriterAgent(AgentRuntime):
             ),
             action(
                 capabilities.build_test_plan,
-                requires_initial={"testwriter.config"},
+                requires_initial={"repo.root", "testwriter.config"},
                 note="Prioritize uncovered modules",
             ),
             action(
@@ -128,10 +128,6 @@ class TestWriterAgent(AgentRuntime):
                 requires_initial={"testwriter.config"},
             ),
             action(capabilities.summarize_test_execution),
-            action(
-                capabilities.repair_failed_tests,
-                requires_initial={"testwriter.config"},
-            ),
             action(
                 capabilities.update_progress_trackers,
                 requires_initial={"testwriter.config"},
@@ -211,10 +207,10 @@ class TestWriterAgent(AgentRuntime):
         except GraphvizUnavailable as exc:
             raise RuntimeError(str(exc)) from exc
 
-    def scenario_report(self, *, coverage_target: Optional[float] = None) -> ScenarioReport:
+    def scenario_report(self, *, coverage_target: Optional[float] = None, run_id: Optional[str] = None) -> ScenarioReport:
         """Replay the latest run from the on-disk memory and compute coverage status."""
 
-        return super().scenario_report(coverage_target=coverage_target)
+        return super().scenario_report(coverage_target=coverage_target, run_id=run_id)
 
     def scenario_timeline(self) -> List[str]:
         """Return an ASCII timeline of atoms written during the latest run."""

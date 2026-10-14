@@ -1,4 +1,4 @@
-"""Firecrawl API integration with graceful fallbacks."""
+"""Firecrawl v1 search integration with explicit provider errors."""
 
 from __future__ import annotations
 
@@ -27,13 +27,15 @@ def fetch_sources(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {"query": query, "num_results": max_results}
+    payload = {"query": query, "limit": max_results, "scrapeOptions": {"formats": ["markdown"]}}
 
     response = httpx.post(DEFAULT_ENDPOINT, json=payload, headers=headers, timeout=timeout)
     response.raise_for_status()
     data = response.json()
 
-    results = data.get("results") or data.get("documents") or []
+    if data.get("success") is False:
+        raise RuntimeError(f"Firecrawl search failed: {data.get('error', 'unknown provider error')}")
+    results = data.get("data") or []
     simplified: List[Dict[str, object]] = []
     for item in results[:max_results]:
         simplified.append(
@@ -41,8 +43,8 @@ def fetch_sources(
                 "query": query,
                 "title": item.get("title") or item.get("name") or f"Result for {query}",
                 "url": item.get("url") or item.get("link") or "",
-                "snippet": item.get("snippet") or item.get("summary") or "",
-                "content": item.get("content") or item.get("raw_content") or "",
+                "snippet": item.get("description") or "",
+                "content": item.get("markdown") or "",
                 "provider": "firecrawl",
             }
         )

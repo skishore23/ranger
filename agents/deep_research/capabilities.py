@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import datetime as dt
 import textwrap
-import time
+import hashlib
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
+from core.execution import generate_with_policy
 from core.errors import GoalBlocked
 from core.llm.provider import RegionBackedProvider, resolve_llm_profile
 from core.sdk import goal, human, step, tool
 from core.workspace import Snapshot
-from topology.registry import get_region
 
 from .firecrawl import fetch_sources, get_api_key
 from .memory_bridge import (
@@ -69,7 +70,7 @@ def _call_model(
     if provider is None:
         raise GoalBlocked("llm_missing_region", details={"stage": stage})
 
-    response = provider.generate(
+    response = generate_with_policy(provider,
         system=system_prompt,
         prompt=prompt,
         model=resolved_model,
@@ -92,23 +93,37 @@ def _apply_length_guardrails(
     min_chars_per_page: int = 1200,
 ) -> str:
     target_chars = config.desired_length_pages * min_chars_per_page
-    if len(body) >= target_chars:
-        return body
+    # Count meaningful unique sentences; copied filler cannot buy report length.
+    sentences = [" ".join(part.split()) for part in re.split(r"(?<=[.!?])\s+|\n+", body) if part.strip()]
+    meaningful = [sentence for sentence in sentences if len(sentence) >= 30]
+    unique = set(meaningful)
+    meaningful_chars = sum(len(sentence) for sentence in unique)
+    if meaningful and len(unique) / len(meaningful) < 0.5:
+        raise GoalBlocked("repeated_content", details={"unique_sentences": len(unique), "sentences": len(meaningful)})
+    if meaningful_chars < target_chars:
+        raise GoalBlocked("insufficient_length", details={"meaningful_chars": meaningful_chars, "target_chars": target_chars})
+    return body
 
-    filler = textwrap.dedent(
-        f"""
-        ## Extended Analysis
-        The strategic calculus surrounding {topic} requires richer scenario modeling. This supplemental analysis expands on
-        adjacent policy, economic, and societal undercurrents. It deepens leadership's ability to navigate uncertainty by
-        codifying trigger points, leading indicators, and portfolio hedges that were partially covered earlier.
-        """
-    ).strip()
 
-    chars_needed = target_chars - len(body)
-    filler_with_spacing = "\n\n" + filler
-    repetitions = (chars_needed + len(filler_with_spacing) - 1) // len(filler_with_spacing)
-    
-    return body + (filler_with_spacing * repetitions)
+def _validate_citations(citations: Any, sources: List[Dict[str, Any]], config: DeepResearchConfig) -> None:
+    by_url = {source.get("url"): source for source in sources if source.get("url")}
+    seen_urls = set()
+    seen_labels = set()
+    if not isinstance(citations, list):
+        raise GoalBlocked("invalid_citations")
+    for citation in citations:
+        if not isinstance(citation, dict):
+            raise GoalBlocked("invalid_citations")
+        url, label = citation.get("url"), citation.get("label")
+        source = by_url.get(url)
+        if not source or not label or (citation.get("source_id") and citation["source_id"] != source.get("id")):
+            raise GoalBlocked("unretrieved_citation", details={"url": url})
+        if url in seen_urls or label in seen_labels:
+            raise GoalBlocked("duplicate_citation", details={"url": url, "label": label})
+        seen_urls.add(url)
+        seen_labels.add(label)
+    if len(seen_urls) < config.min_citations:
+        raise GoalBlocked("insufficient_citations", details={"have": len(seen_urls), "need": config.min_citations})
 
 
 def _dedupe_sources(sources: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -116,7 +131,7 @@ def _dedupe_sources(sources: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for src in sources:
         key = src.get("url") or src.get("title") or str(len(seen))
         if key not in seen:
-            seen[key] = src
+            seen[key] = {**src, "id": "source:" + hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:16]}
     return list(seen.values())
 
 
@@ -271,9 +286,9 @@ def synthesize_notes(ws: Snapshot) -> Dict[str, Any]:
 
     excerpts = []
     for src in sources[:12]:
-        snippet = src.get("snippet") or src.get("content") or ""
+        snippet = src.get("content") or src.get("snippet") or ""
         if snippet:
-            excerpts.append(snippet)
+            excerpts.append({"id": src.get("id"), "url": src.get("url"), "title": src.get("title"), "excerpt": snippet})
 
     prompt = textwrap.dedent(
         f"""
@@ -301,7 +316,7 @@ def synthesize_notes(ws: Snapshot) -> Dict[str, Any]:
                         "value": {"type": "string"},
                         "source": {"type": "string"},
                     },
-                    "required": ["metric", "value"],
+                    "required": ["metric", "value", "source"],
                 },
             },
             "controversies": {"type": "array", "items": {"type": "string"}},
@@ -321,6 +336,12 @@ def synthesize_notes(ws: Snapshot) -> Dict[str, Any]:
     if not isinstance(notes, dict):
         raise GoalBlocked("llm_invalid_response", details={"stage": "notes"})
 
+    source_refs = {source.get("id") for source in sources} | {source.get("url") for source in sources}
+    source_refs.discard(None)
+    for statistic in notes.get("statistics", []):
+        if statistic.get("source") not in source_refs:
+            raise GoalBlocked("unretrieved_note_source", details={"source": statistic.get("source")})
+    notes["sources"] = [{"id": source.get("id"), "url": source.get("url"), "title": source.get("title")} for source in sources]
     store_notes(notes)
     return {"research.notes": notes}
 
@@ -340,6 +361,7 @@ def draft_report(ws: Snapshot) -> Dict[str, Any]:
         f"""
         Write a {config.desired_length_pages}-page, doctoral-level report on "{topic}" with a minimum of {config.min_citations} citations.
         Incorporate these findings: {notes}.
+        Retrieved sources (cite only these exact IDs and URLs): {sources}.
         Cite sources with author-year style and include URLs. Provide a detailed executive summary, sectioned analysis, counterpoints, and strategic recommendations.
         """
     ).strip()
@@ -356,11 +378,12 @@ def draft_report(ws: Snapshot) -> Dict[str, Any]:
                         "label": {"type": "string"},
                         "title": {"type": "string"},
                         "url": {"type": "string"},
+                        "source_id": {"type": "string"},
                         "publisher": {"type": "string"},
                         "year": {"type": "integer"},
                         "accessed": {"type": "string"},
                     },
-                    "required": ["label", "title"],
+                    "required": ["label", "title", "url"],
                 },
             },
         },
@@ -380,11 +403,7 @@ def draft_report(ws: Snapshot) -> Dict[str, Any]:
     draft = result.get("draft")
     citations = result.get("citations", [])
 
-    if len(citations) < config.min_citations:
-        raise GoalBlocked(
-            "insufficient_citations",
-            details={"have": len(citations), "need": config.min_citations}
-        )
+    _validate_citations(citations, sources, config)
 
     # Ensure the draft references the topic and meets length guardrails
     draft = draft.replace("[[TOPIC]]", topic)
@@ -405,7 +424,9 @@ def draft_report(ws: Snapshot) -> Dict[str, Any]:
     ],
 )
 def human_review(form: Dict[str, Any], ws: Snapshot) -> Dict[str, Any]:
-    status = form.get("status", "approve")
+    status = (form or {}).get("status")
+    if status not in {"approve", "revise"}:
+        raise GoalBlocked("human_feedback_required", details={"status": status})
     comments = form.get("comments", "")
     return {
         "human.feedback": {
@@ -423,12 +444,7 @@ def ensure_feedback(ws: Snapshot) -> Dict[str, Any]:
         return {"human.feedback": existing}
 
     if config.require_human_feedback:
-        return {
-            "human.feedback": {
-                "status": "pending-review",
-                "comments": "Awaiting human feedback – replace this placeholder with reviewer input.",
-            }
-        }
+        return {}
 
     return {
         "human.feedback": {
@@ -442,7 +458,9 @@ def ensure_feedback(ws: Snapshot) -> Dict[str, Any]:
 def integrate_feedback(ws: Snapshot) -> Dict[str, Any]:
     config = _config_from_snapshot(ws)
     draft = ws.get("research.draft", "")
-    feedback = ws.get("human.feedback") or {"status": "auto-approve", "comments": "Auto approval"}
+    feedback = ws.get("human.feedback") or {}
+    if config.require_human_feedback and feedback.get("status") != "approve":
+        raise GoalBlocked("human_feedback_required", details={"status": feedback.get("status")})
 
     annotations = textwrap.dedent(
         f"""
@@ -458,7 +476,7 @@ def integrate_feedback(ws: Snapshot) -> Dict[str, Any]:
 
 
 @step(
-    inputs=["research.final_draft", "research.citations", "research.request", "deepresearch.config"],
+    inputs=["research.final_draft", "research.citations", "research.sources", "research.request", "deepresearch.config"],
     outputs=["research.report", "research.metadata"],
 )
 def finalize_report(ws: Snapshot) -> Dict[str, Any]:
@@ -468,6 +486,8 @@ def finalize_report(ws: Snapshot) -> Dict[str, Any]:
     request = ws.get("research.request") or {}
     topic = request.get("topic", "the domain")
 
+    _validate_citations(citations, ws.get("research.sources") or [], config)
+    _apply_length_guardrails(body=draft, config=config, topic=topic)
     report = draft
     metadata = {
         "topic": topic,
@@ -513,7 +533,7 @@ def summarize_execution(ws: Snapshot) -> Dict[str, Any]:
     return {"research.summary": summary}
 
 
-@goal(scope={"research.report", "research.citations", "research.summary"})
+@goal(scope={"research.report", "research.citations", "research.sources", "research.summary", "deepresearch.config", "human.feedback"})
 def research_complete(ws: Snapshot) -> bool:
     report = ws.get("research.report")
     citations = ws.get("research.citations") or []
@@ -521,18 +541,10 @@ def research_complete(ws: Snapshot) -> bool:
         return False
 
     config = _config_from_snapshot(ws)
-    approx_pages = len(report) / 1200
-
-    if len(citations) < config.min_citations:
-        raise GoalBlocked(
-            "insufficient_citations",
-            details={"have": len(citations), "need": config.min_citations},
-        )
-    if approx_pages < config.desired_length_pages:
-        raise GoalBlocked(
-            "insufficient_length",
-            details={"estimated_pages": round(approx_pages, 1), "target_pages": config.desired_length_pages},
-        )
+    _validate_citations(citations, ws.get("research.sources") or [], config)
+    _apply_length_guardrails(body=report, config=config, topic="")
+    if config.require_human_feedback and (ws.get("human.feedback") or {}).get("status") != "approve":
+        raise GoalBlocked("human_feedback_required")
     return True
 
 

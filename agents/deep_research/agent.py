@@ -28,7 +28,7 @@ MEMORY_KEY = "deepresearch.memory"
 MEMORY_DOMAIN = "deepresearch"
 LLM_KEY = "deepresearch.llm"
 DB_FILENAME = "deepresearch.db"
-DEFAULT_BUDGET = Budget(tokens=20000, ms=120000, calls=16)
+DEFAULT_BUDGET = Budget(tokens=200000, ms=300000, calls=120)
 
 logger = logging.getLogger(__name__)
 
@@ -157,9 +157,13 @@ class DeepResearchAgent(AgentRuntime):
                 6,
                 action(
                     capabilities.human_review,
+                    requires_initial=config_initial,
                     note="Collect human feedback",
                 ),
             )
+
+        if self.config.require_human_feedback:
+            capability_actions = [item for item in capability_actions if item.capability is not capabilities.ensure_feedback]
 
         if self._plugins:
             capability_actions.extend(action(plugin) for plugin in self._plugins)
@@ -231,12 +235,8 @@ class DeepResearchAgent(AgentRuntime):
         except GraphvizUnavailable as exc:
             raise RuntimeError(str(exc)) from exc
 
-    def scenario_report(self, *, coverage_target: Optional[float] = None) -> ScenarioReport:
-        harness = self._load_harness()
-        if harness is None or not harness.atoms:
-            atoms = () if harness is None else harness.atoms
-            return ScenarioReport(ok=False, coverage=None, goal_blocked=None, atoms=atoms)
-        return harness.generate_report(coverage_target=coverage_target)
+    def scenario_report(self, *, coverage_target: Optional[float] = None, run_id: Optional[str] = None) -> ScenarioReport:
+        return super().scenario_report(coverage_target=coverage_target, run_id=run_id)
 
     def scenario_timeline(self) -> List[str]:
         return super().scenario_timeline()
