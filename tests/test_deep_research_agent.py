@@ -75,3 +75,34 @@ def test_deep_research_scenario_helpers(tmp_path: Path) -> None:
     report = agent.scenario_report()
     assert not report.ok
     assert agent.scenario_timeline() == []
+
+
+def test_required_review_public_interactive_blank_cannot_publish(tmp_path, monkeypatch):
+    import core.runners.human_runner as human_runner
+    monkeypatch.setattr(human_runner.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.delenv('RANGER_FIELD_STATUS', raising=False)
+    monkeypatch.delenv('RANGER_FIELD_COMMENTS', raising=False)
+    responses = iter(['', ''])
+    monkeypatch.setattr('builtins.input', lambda *a: next(responses))
+    agent = _offline_agent(tmp_path, monkeypatch, require_review=True)
+    result = agent.run()
+    assert not result.ok
+    assert result.blocker.reason == 'human_feedback_required'
+    assert not result.final.exists('human.feedback')
+    assert not result.final.exists('research.report')
+    assert not (tmp_path / 'report.md').exists()
+
+
+def test_required_review_public_interactive_explicit_approve_publishes(tmp_path, monkeypatch):
+    import core.runners.human_runner as human_runner
+    monkeypatch.setattr(human_runner.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.delenv('RANGER_FIELD_STATUS', raising=False)
+    monkeypatch.delenv('RANGER_FIELD_COMMENTS', raising=False)
+    responses = iter(['approve', ''])
+    monkeypatch.setattr('builtins.input', lambda *a: next(responses))
+    agent = _offline_agent(tmp_path, monkeypatch, require_review=True)
+    result = agent.run()
+    assert result.ok, result.blocker
+    assert result.final.get('human.feedback')['status'] == 'approve'
+    assert result.final.exists('research.report')
+    assert (tmp_path / 'report.md').exists()

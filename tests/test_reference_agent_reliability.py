@@ -343,3 +343,66 @@ def test_reference_side_effects_cross_registered_guard_boundary(tmp_path, monkey
     assert not result.ok
     assert result.blocker.reason == 'policy_blocked'
     clear_registry()
+
+
+@pytest.mark.parametrize('invalid', ['directory', 'file_ancestor', 'tests_root_file', 'batch_parent_first', 'batch_child_first'])
+def test_whole_batch_preflight_rejects_destination_types_and_ancestors(tmp_path, invalid):
+    root = tmp_path / 'repo'
+    root.mkdir()
+    if invalid == 'tests_root_file':
+        (root / 'tests').write_text('tests root is a file')
+        first = root / 'tests/test_first.py'
+        requests = [{'path': 'tests/test_first.py', 'content': 'replacement'}]
+    else:
+        (root / 'tests').mkdir()
+        first = root / 'tests/test_first.py'
+        first.write_text('original')
+        requests = [{'path': 'tests/test_first.py', 'content': 'replacement'}]
+        if invalid == 'directory':
+            (root / 'tests/existing_dir').mkdir()
+            requests.append({'path': 'tests/existing_dir', 'content': 'invalid'})
+        elif invalid == 'file_ancestor':
+            (root / 'tests/ancestor').write_text('ancestor original')
+            requests.append({'path': 'tests/ancestor/test_nested.py', 'content': 'invalid'})
+        else:
+            conflicts = [{'path': 'tests/new_ancestor', 'content': 'ancestor'}, {'path': 'tests/new_ancestor/test_nested.py', 'content': 'descendant'}]
+            if invalid == 'batch_child_first':
+                conflicts.reverse()
+            requests.extend(conflicts)
+    with pytest.raises(GoalBlocked, match='invalid_test_write'):
+        invoke(tw.write_test_files, {'repo.root': str(root), 'tests.write.requests': requests})
+    if invalid == 'tests_root_file':
+        assert (root / 'tests').read_text() == 'tests root is a file'
+        assert not first.exists()
+    else:
+        assert first.read_text() == 'original'
+        if invalid == 'file_ancestor':
+            assert (root / 'tests/ancestor').read_text() == 'ancestor original'
+        if invalid.startswith('batch_'):
+            assert not (root / 'tests/new_ancestor').exists()
+
+
+@pytest.mark.parametrize('selection', ['', 'approve'])
+def test_required_review_actual_interactive_runner_requires_explicit_selection(monkeypatch, selection):
+    import core.runners.human_runner as human_runner
+    monkeypatch.setattr(human_runner.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.delenv('RANGER_FIELD_STATUS', raising=False)
+    monkeypatch.delenv('RANGER_FIELD_COMMENTS', raising=False)
+    responses = iter([selection, ''])
+    monkeypatch.setattr('builtins.input', lambda *a: next(responses))
+    values = research_values(DeepResearchConfig(require_human_feedback=True))
+    if not selection:
+        with pytest.raises(GoalBlocked, match='human_feedback_required'):
+            invoke(dr.human_review, values)
+    else:
+        result = invoke(dr.human_review, values)
+        assert result['human.feedback']['status'] == 'approve'
+        integrated = invoke(dr.integrate_feedback, {**values, **result})
+        assert integrated['research.final_draft'].startswith(values['research.draft'])
+
+
+@pytest.mark.parametrize('filler', ['Filler filler. ' * 5000, 'Echo\n' * 5000], ids=['short-sentences', 'short-lines'])
+def test_good_substantive_content_plus_short_repeated_filler_is_rejected(filler):
+    body = meaningful_report() + '\n\n' + filler
+    with pytest.raises(GoalBlocked, match='repeated_content'):
+        dr._apply_length_guardrails(body=body, config=DeepResearchConfig(desired_length_pages=1), topic='Topic')

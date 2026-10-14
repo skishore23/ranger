@@ -830,7 +830,11 @@ def write_test_files(ws: Snapshot) -> Dict[str, Any]:
     targets = []
     for req in requests:
         target = _safe_test_path(root, req.get("path", ""))
-        if not isinstance(req.get("content"), str) or target in targets:
+        invalid_destination = target.exists() and not target.is_file()
+        invalid_ancestor = any(parent.exists() and not parent.is_dir() for parent in target.parents)
+        batch_conflict = any(target == previous or target in previous.parents or previous in target.parents
+                             for previous in targets)
+        if not isinstance(req.get("content"), str) or invalid_destination or invalid_ancestor or batch_conflict:
             raise GoalBlocked("invalid_test_write", details={"path": req.get("path")})
         targets.append(target)
 

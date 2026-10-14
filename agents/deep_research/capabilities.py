@@ -98,8 +98,11 @@ def _apply_length_guardrails(
     meaningful = [sentence for sentence in sentences if len(sentence) >= 30]
     unique = set(meaningful)
     meaningful_chars = sum(len(sentence) for sentence in unique)
-    if meaningful and len(unique) / len(meaningful) < 0.5:
-        raise GoalBlocked("repeated_content", details={"unique_sentences": len(unique), "sentences": len(meaningful)})
+    # Duplication is independent of the meaningful-length threshold: short
+    # copied sentences or lines cannot dominate otherwise substantial prose.
+    unique_units = set(sentences)
+    if sentences and len(unique_units) / len(sentences) < 0.5:
+        raise GoalBlocked("repeated_content", details={"unique_units": len(unique_units), "units": len(sentences)})
     if meaningful_chars < target_chars:
         raise GoalBlocked("insufficient_length", details={"meaningful_chars": meaningful_chars, "target_chars": target_chars})
     return body
@@ -419,7 +422,7 @@ def draft_report(ws: Snapshot) -> Dict[str, Any]:
     title="Deep research review",
     description="Validate structure, accuracy, and tone; suggest clarifications before publication.",
     fields=[
-        {"name": "status", "type": "select", "options": ["approve", "revise"], "label": "Status"},
+        {"name": "status", "type": "select", "options": ["approve", "revise"], "label": "Status", "default_first_option": False},
         {"name": "comments", "type": "textarea", "label": "Feedback"},
     ],
 )

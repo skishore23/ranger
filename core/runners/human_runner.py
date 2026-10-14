@@ -27,7 +27,9 @@ class HumanRunner:
         Args:
             title: Title for the human review card.
             description: Description of what human should do.
-            fields: Form fields for human input.
+            fields: Form fields for human input. Select fields may set
+                default_first_option=False to preserve blank selections for
+                explicit validation by the callback.
             callback: Optional function that maps responses/snapshot to workspace writes.
             write_keys: Declared output keys for the capability.
         """
@@ -77,7 +79,7 @@ class HumanRunner:
                     options = field.get("options", [])
                     prompt = f"{label} {options}: "
                     value = input(prompt).strip()
-                    if not value and options:
+                    if not value and options and field.get("default_first_option", True):
                         value = str(options[0])
                 elif field_type == "textarea":
                     print(f"{label} (finish with empty line):")
