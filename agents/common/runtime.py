@@ -54,6 +54,8 @@ class AgentRuntime:
         if guard_regions is not None:
             options.setdefault("guards", list(guard_regions))
         self._db_path = Path(options["db_path"])
+        self.memory_key = options["memory_key"]
+        self.memory_domain = options["domain"]
         setup_memory(**options)
 
         self.budget = budget

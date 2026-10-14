@@ -400,3 +400,101 @@ def test_noop_missing_output_is_suppressed_until_reads_change(tmp_path):
     result = Agent([noop, advance], trace_path=tmp_path / 'loop.db').run(initial={'n': 0}, goal=lambda s: s['n'] == 2, max_steps=4)
     assert result.ok
     assert calls == [0, 1]
+
+
+@pytest.mark.parametrize('finish_status', ['failed', 'blocked'])
+def test_replay_rejects_terminal_capability_failure_followed_by_success(tmp_path, finish_status):
+    from core.trace import replay_run
+    db = tmp_path / 'runs.db'
+    result = Agent([inc], trace_path=db).run(initial={'a': 1}, goal=done)
+    with sqlite3.connect(db) as conn:
+        row = conn.execute("SELECT seq,payload FROM execution_events WHERE run_id=? AND kind='capability_finished'", (result.run_id,)).fetchone()
+        payload = {**json.loads(row[1]), 'status': finish_status, 'error': 'terminal failure'}
+        conn.execute('UPDATE execution_events SET payload=? WHERE run_id=? AND seq=?', (json.dumps(payload), result.run_id, row[0]))
+    with pytest.raises(ValueError):
+        replay_run(db, result.run_id)
+    with pytest.raises(ValueError):
+        ScenarioHarness.from_sqlite(db, run_id=result.run_id)
+    cli = CliRunner().invoke(app, ['scenario', str(db), '--run-id', result.run_id, '--json'])
+    assert cli.exit_code != 0
+
+
+@pytest.mark.parametrize('corruption', ['early_met', 'stale_met', 'wrong_steps', 'goal_failed', 'goal_blocked'])
+def test_success_requires_terminal_goal_for_final_state(tmp_path, corruption):
+    from core.trace import replay_run
+    db = tmp_path / 'runs.db'
+    result = Agent([inc], trace_path=db).run(initial={'a': 1}, goal=done)
+    with sqlite3.connect(db) as conn:
+        events = conn.execute('SELECT seq,kind,payload FROM execution_events WHERE run_id=? ORDER BY seq', (result.run_id,)).fetchall()
+        for seq, kind, raw in events:
+            payload = json.loads(raw)
+            if corruption in ('early_met', 'stale_met') and kind == 'goal':
+                payload['status'] = 'met' if payload['step'] == 0 else ('unmet' if corruption == 'stale_met' else 'met')
+            elif corruption == 'wrong_steps' and kind == 'outcome':
+                payload['steps'] += 1
+            elif corruption in ('goal_failed', 'goal_blocked') and kind == 'goal' and payload['step'] == 1:
+                payload['status'] = corruption.removeprefix('goal_')
+            conn.execute('UPDATE execution_events SET payload=? WHERE run_id=? AND seq=?', (json.dumps(payload), result.run_id, seq))
+    with pytest.raises(ValueError):
+        replay_run(db)
+    with pytest.raises(ValueError):
+        ScenarioHarness.from_sqlite(db)
+
+
+def test_legal_soft_retry_and_terminal_failure_keep_earlier_commits(tmp_path):
+    from core.trace import replay_run
+    attempts = []
+    @step(outputs=['b'], name='a.retry')
+    def retry(s):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise GoalBlocked('llm_invalid_output')
+        return {'b': 2}
+    db = tmp_path / 'runs.db'
+    success = Agent([retry], trace_path=db).run(initial={}, goal=done)
+    assert success.ok and replay_run(db)['state'] == {'b': 2}
+    assert [e['payload']['status'] for e in replay_run(db)['events'] if e['kind'] == 'capability_finished'] == ['retry', 'succeeded']
+    @step(outputs=['a'], name='a.commit')
+    def first(s):
+        return {'a': 1}
+    for error in (GoalBlocked('policy_blocked'), RuntimeError('failed')):
+        @step(outputs=['z'], name='z.fail')
+        def fail(s):
+            raise error
+        agent = Agent([first, fail], trace_path=db)
+        if isinstance(error, GoalBlocked):
+            assert not agent.run(initial={}, goal=done).ok
+            expected = 'blocked'
+        else:
+            with pytest.raises(RuntimeError):
+                agent.run(initial={}, goal=done)
+            expected = 'failed'
+        replay = replay_run(db)
+        assert replay['status'] == expected and replay['state'] == {'a': 1}
+
+
+def test_runtime_overrides_use_actual_domain_key_and_failed_evidence(tmp_path):
+    from topology.registry import get_region
+    @step(outputs=['b'])
+    def write_failed(s):
+        memory = get_region('actual-key')
+        memory.write([replace(atom(content={'status': 'failed', 'returncode': 1,
+                    'coverage': {'totals': {'percent_covered': 99}}}), schema='testwriter.execution@v1')])
+        return {'b': 2}
+    runtime = AgentRuntime(repo_root=tmp_path, capability_list=[write_failed], budget=Budget(10000,10000,10),
+                           memory_key='declared-key', memory_domain='declared-domain', db_filename='runs.db',
+                           memory_kwargs={'memory_key': 'actual-key', 'domain': 'actual-domain'})
+    result = runtime.run_agent(initial={}, goal=done, max_steps=1)
+    report = runtime.scenario_report(run_id=result.run_id)
+    assert not report.ok and report.atoms and report.coverage.actual == .99
+    assert runtime.memory_domain == 'actual-domain' and runtime.memory_key == 'actual-key'
+    assert runtime.agent.engine.trace_domain == 'actual-domain'
+    assert not ScenarioHarness.from_sqlite(runtime.db_path, domain='actual-domain', run_id=result.run_id).generate_report().ok
+
+
+@pytest.mark.parametrize('same_domain', [False, True])
+def test_summary_canonicalizes_duplicate_id_sources(tmp_path, same_domain):
+    memory = MemSQLite('m', str(tmp_path / 'atoms.db'), 'd')
+    a = atom('same', content={'left': 1}, facets={'domain': 'left'})
+    b = atom('same', content={'right': 2}, facets={'domain': 'left' if same_domain else 'right'})
+    assert memory.summarize([a, b], {}) == memory.summarize([b, a], {})

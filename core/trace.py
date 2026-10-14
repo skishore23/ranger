@@ -142,6 +142,8 @@ def replay_run(db_path, run_id=None) -> dict:
         raise ValueError('Malformed execution run')
     state, decoded, terminal = {}, [], None
     active_capability = None
+    required_outcomes = None
+    last_goal = None
     previous_elapsed = -1
     previous_kind = None
     allowed = {'initial', 'goal', 'capability_started', 'capability_finished', 'commit', 'memory_atom', 'outcome'}
@@ -156,6 +158,8 @@ def replay_run(db_path, run_id=None) -> dict:
                 or type(event['elapsed_ms']) not in (int, float) or not math.isfinite(event['elapsed_ms']) or event['elapsed_ms'] < previous_elapsed
                 or terminal is not None or (index == 0) != (kind == 'initial')):
             raise ValueError('Malformed execution event sequence')
+        if required_outcomes is not None and kind != 'outcome':
+            raise ValueError('Execution continued after a terminal capability or goal result')
         previous_elapsed = event['elapsed_ms']
         if kind == 'capability_started':
             if active_capability is not None or not isinstance(payload.get('capability'), str):
@@ -168,6 +172,8 @@ def replay_run(db_path, run_id=None) -> dict:
             duration = payload.get('duration_ms')
             if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
                 raise ValueError('Malformed capability duration')
+            if payload.get('status') in {'failed', 'blocked'}:
+                required_outcomes = {payload['status']}
             active_capability = None
         if kind in {'goal', 'outcome'} and active_capability is not None:
             raise ValueError('Unfinished capability evidence')
@@ -190,8 +196,18 @@ def replay_run(db_path, run_id=None) -> dict:
                 if not isinstance(writes, dict) or dumps({**state, **writes}) != dumps(snapshot):
                     raise ValueError('Inconsistent committed state')
             state = snapshot
-        if kind == 'goal' and payload.get('status') not in {'met', 'unmet', 'blocked', 'failed'}:
-            raise ValueError('Malformed goal evidence')
+        if kind == 'goal':
+            status, step = payload.get('status'), payload.get('step')
+            if status not in {'met', 'unmet', 'blocked', 'failed'} or type(step) is not int or step < 0:
+                raise ValueError('Malformed goal evidence')
+            if last_goal is not None and step <= last_goal['step']:
+                raise ValueError('Non-increasing goal step')
+            last_goal = {'status': status, 'step': step, 'state': dumps(state)}
+            if status == 'met':
+                # A met goal ends solve; a late deadline can still block its outcome.
+                required_outcomes = {'succeeded', 'blocked', 'failed'}
+            elif status in {'blocked', 'failed'}:
+                required_outcomes = {status}
         if kind == 'capability_started' and not isinstance(payload.get('capability'), str):
             raise ValueError('Malformed capability evidence')
         if kind == 'capability_finished' and (not isinstance(payload.get('capability'), str) or payload.get('status') not in {'succeeded', 'blocked', 'failed', 'retry'}):
@@ -200,12 +216,17 @@ def replay_run(db_path, run_id=None) -> dict:
             terminal = payload.get('status')
             if terminal not in {'succeeded', 'blocked', 'failed'} or dumps(payload.get('state')) != dumps(state):
                 raise ValueError('Malformed terminal outcome')
+            if required_outcomes is not None and terminal not in required_outcomes:
+                raise ValueError('Terminal outcome contradicts capability or goal result')
+            if terminal == 'succeeded' and (
+                    previous_kind != 'goal' or last_goal is None or last_goal['status'] != 'met'
+                    or last_goal['state'] != dumps(state) or type(payload.get('steps')) is not int
+                    or payload['steps'] != last_goal['step'] or payload.get('blocker') is not None):
+                raise ValueError('Success requires the terminal goal check for the final state')
         previous_kind = kind
         decoded.append({'seq': index, 'kind': kind, 'elapsed_ms': event['elapsed_ms'], 'payload': payload})
     if row['status'] != (terminal or 'running'):
         raise ValueError('Incomplete terminal evidence')
-    if terminal == 'succeeded' and not any(e['kind'] == 'goal' and e['payload']['status'] == 'met' for e in decoded):
-        raise ValueError('Missing successful goal evidence')
     return {'state': state, 'run_id': row['run_id'], 'status': row['status'], 'events': decoded}
 
 

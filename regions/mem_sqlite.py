@@ -227,7 +227,11 @@ class MemSQLite:
         Returns:
             Summary atom
         """
-        atom_list = sorted(atoms, key=lambda atom: atom.id)
+        # Composite storage keys permit identical IDs across domains. Canonical
+        # full content also breaks ties for same-domain IDs collected from regions.
+        atom_list = sorted(atoms, key=lambda atom: (
+            atom.id, json.dumps(atom.facets.get("domain"), sort_keys=True),
+            json.dumps(asdict(atom), sort_keys=True, separators=(",", ":"), allow_nan=False)))
         
         if not atom_list:
             return self._create_empty_summary(goal)
