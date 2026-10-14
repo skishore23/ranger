@@ -130,7 +130,7 @@ class TestWriterAgent(AgentRuntime):
             action(capabilities.summarize_test_execution),
             action(
                 capabilities.update_progress_trackers,
-                requires_initial={"testwriter.config"},
+                requires_initial=base_initial,
             ),
             action(
                 capabilities.detect_terminal_state,

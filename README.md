@@ -180,6 +180,12 @@ Trace state must use JSON `null`/`None`, booleans, integers, finite floats, stri
 
 `ranger trace` inspects memory atoms, which are separate from SDK execution events. For example, after running a reference agent: `ranger trace .ranger/testwriter.db --domain testwriter --limit 20`.
 
+## Reusable validation evidence
+
+`core.evidence` supplies `capture_binding`, `bind_evidence`, `check_binding` and `check_evidence`. Capture declared JSON inputs/file bytes before validation, attach the actual Boolean outcome, and require a matching current binding at acceptance. Checks return `GoalCheck` with unmet requirements. Missing/malformed evidence, changed inputs, changed file inventory or context, and a different validator cannot approve a candidate. The application supplies the current dependency list independently. See the [complete example and binding contract](docs/EVIDENCE_BINDING.md).
+
+The testwriter uses this facility for both pytest and coverage, covering its source module, generated tests, target/attempt and validation settings. Its final goal rechecks evidence even when terminal success was cached. Bindings are content fingerprints with explicit scope; they do not infer dependencies or authenticate validator outcomes.
+
 ## Budgets and policy boundaries
 
 Defaults are **200000 estimated model token units, 300000 milliseconds and 120 capability attempts**. `max_steps` separately limits serial batches (default 60). Calls count capability attempts, including retries. Explicit zero and smaller limits remain authoritative; an already satisfied initial goal can succeed without executing capabilities.

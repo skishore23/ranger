@@ -159,3 +159,16 @@ print(result.run_id)
                                     '--run-id', run_id, '--json'], outside))
     assert explained['goal']['unmet'] == ['need verified output']
     assert explained['schedules'][0]['capabilities'][0]['missing'] == ['required']
+
+
+def test_installed_evidence_example(installed):
+    python, cli, outside, source, mode = installed
+    document = (source / 'docs/EVIDENCE_BINDING.md').read_text()
+    example = document.split('```python\n', 1)[1].split('```', 1)[0]
+    script = outside / 'evidence_example.py'
+    script.write_text(example)
+    command([python, script], outside)
+    replay = json.loads(command([cli, 'replay', '.ranger/evidence.db', '--json'], outside))
+    assert replay['status'] == 'succeeded'
+    assert replay['state']['validation']['passed'] is True
+    assert replay['state']['validation']['binding']['state'].keys() == {'candidate', 'criteria'}

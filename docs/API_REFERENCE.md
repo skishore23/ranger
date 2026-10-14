@@ -28,6 +28,14 @@ Model tokens are estimated conservatively: serialized full-request UTF-8 bytes +
 
 For direct custom provider calls in Python steps, use `core.execution.generate_with_policy(provider, system=..., prompt=..., model=..., temperature=..., max_tokens=..., schema=...)`. `@llm` and built-in adapters already use this boundary. Registered guards enforce policy on complete requests/action inputs, fail closed on errors/failed repairs, and reject schema-changing repairs. They do not sandbox arbitrary Python.
 
+## Reusable evidence binding (`core.evidence`)
+
+`capture_binding(state=None, *, keys=(), root=None, files=(), context=None)` fingerprints declared JSON values and exact file bytes. Files must resolve inside the supplied root; at least one key/file is required. Capture before validation. `bind_evidence(binding, *, validator, passed, details=None)` attaches the actual Boolean outcome as a defensive JSON record.
+
+`check_binding(binding, state=None, *, keys=(), root=None, files=(), context=None)` returns a GoalCheck for applicability. `check_evidence(evidence, state=None, *, validator, keys=(), root=None, files=(), context=None)` also requires passing evidence from the expected validator. Provide current dependencies independently; do not derive them from saved evidence. Missing, malformed or stale inputs fail closed. Strict state-read violations still raise ContractViolation.
+
+These are content bindings with caller-defined context; identical inputs/scope remain applicable. Include attempts, rules and external versions as dependencies when needed. Checks neither rerun nor authenticate validators and do not lock files. See [Evidence binding](EVIDENCE_BINDING.md) for the executable example and testwriter adoption.
+
 ## Recording and replay (`core.trace`)
 
 SDK recording defaults to `.ranger/runs.db` relative to cwd. `trace_path` changes the database; `trace=False` opts out and leaves `run_id=None`. Low-level `core.engine.Engine` defaults to nonrecording. `Plan.compile` forwards trace options. State/evidence must be strict JSON: None, exact bool/int, finite float, str, list, string-keyed dict. Tuples, sets, custom objects, non-string keys, cycles and nonfinite numbers fail visibly. Recorder errors propagate and cannot certify persistence; prior side effects or workspace publication cannot be rolled back by the recorder.

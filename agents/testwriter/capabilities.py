@@ -13,7 +13,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.errors import GoalBlocked
+from core.errors import GoalBlocked, GoalCheck
+from core.evidence import capture_binding, bind_evidence, check_binding, check_evidence
 from core.execution import selected_snapshot
 from core.sdk import goal, step, tool, llm
 from core.workspace import Snapshot
@@ -27,6 +28,8 @@ from .memory_bridge import (
 from core.runners.llm_runner import SkipLLM
 
 COVERAGE_PATH = ".testwriter_coverage.json"
+PYTEST_VALIDATOR = 'testwriter.pytest@1'
+COVERAGE_VALIDATOR = 'testwriter.coverage@1'
 from .utils import (
     build_plan_entries,
     candidate_test_paths,
@@ -111,11 +114,9 @@ def _check_file_selectors(ws: Snapshot, *, execution: bool = False) -> None:
 
 def _artifacts(root: Path, paths) -> List[Dict[str, str]]:
     """Canonical destinations and exact bytes certified by a pytest execution."""
-    return sorted(
-        ({"path": str(target.relative_to(root)), "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
-         for target in {_safe_test_path(root, path) for path in paths}),
-        key=lambda artifact: artifact["path"],
-    )
+    canonical = sorted({target.relative_to(root).as_posix()
+                        for target in {_safe_test_path(root, path) for path in paths}})
+    return capture_binding(root=root, files=canonical)['files'] if canonical else []
 
 
 def _artifacts_match(root: Path, artifacts) -> bool:
@@ -123,8 +124,87 @@ def _artifacts_match(root: Path, artifacts) -> bool:
         return False
     try:
         return artifacts == _artifacts(root, [artifact["path"] for artifact in artifacts])
-    except (OSError, KeyError, TypeError, GoalBlocked):
+    except (OSError, KeyError, TypeError, ValueError, GoalBlocked):
         return False
+
+
+def _requested_artifacts(root, requests):
+    """Canonical paths and exact UTF-8 bytes required by the current candidate."""
+    return sorted(
+        ({'path': _safe_test_path(root, req['path']).relative_to(root).as_posix(),
+          'sha256': hashlib.sha256(req['content'].encode('utf-8')).hexdigest()} for req in requests),
+        key=lambda artifact: artifact['path'],
+    )
+
+
+def _candidate_scope_check(ws):
+    active = ws.get('tests.active.entry')
+    requests = ws.get('tests.write.requests')
+    if requests is None:
+        requests = []
+    if not isinstance(requests, list) or any(
+            not isinstance(request, dict) or not isinstance(request.get('path'), str)
+            or not isinstance(request.get('content'), str) for request in requests):
+        return GoalCheck(False, ('Current test write requests are invalid',))
+    if active is None:
+        return GoalCheck(not requests, ('Test write requests lack an active target',) if requests else ())
+    if not isinstance(active, dict) or not active.get('path'):
+        return GoalCheck(False, ('Current active test target is invalid',))
+    planned = [entry for entry in ws.get('tests.todo', []) if entry.get('path') == active['path']]
+    if len(planned) != 1 or active.get('module') != planned[0].get('module'):
+        return GoalCheck(False, ('Active target differs from current test plan',))
+    if any(not _matches(request, active) for request in requests):
+        return GoalCheck(False, ('Write requests belong to a different target or attempt',))
+    return GoalCheck(True)
+
+
+def _validation_arguments(root, entry, paths, config):
+    """Expected scope comes from current application inputs, not saved bindings."""
+    if not isinstance(paths, (list, tuple, set)) or not paths or not entry.get('path'):
+        raise ValueError('Validation requires a source module and selected tests')
+    return {'root': root, 'files': [entry['path'], *sorted(paths)],
+            'context': {'identity': _identity(entry), 'module': entry.get('module'),
+                        'pytest_args': list(config.pytest_args), 'run_tests': config.run_tests,
+                        'coverage_target': config.coverage_target}}
+
+
+def _coverage_evidence(run_result, passed):
+    evidence = run_result.get('evidence')
+    if not isinstance(evidence, dict):
+        return None
+    try:
+        return bind_evidence(evidence.get('binding'), validator=COVERAGE_VALIDATOR, passed=bool(passed))
+    except (ValueError, TypeError):
+        return None
+
+
+def _target_evidence_check(ws, entry, metadata):
+    """Recheck exact current source/tests, attempt and validation settings."""
+    path = entry.get('path')
+    identity = {'target': path, 'attempt': metadata.get('attempts')}
+    if (not path or metadata.get('identity') != identity or metadata.get('status') != 'passed'
+            or not metadata.get('coverage_met')):
+        return GoalCheck(False, ('Target lacks passing validation',))
+    active = ws.get('tests.active.entry') or {}
+    if active.get('path') == path and _identity(active) != identity:
+        return GoalCheck(False, ('Validation belongs to a different attempt',))
+    current_entry = {**entry, 'attempt': metadata.get('attempts')}
+    root_value = ws.get('repo.root')
+    if not root_value:
+        return GoalCheck(False, ('Validation repository is unavailable',))
+    try:
+        root = Path(root_value).resolve()
+        if not _artifacts_match(root, metadata.get('artifacts')):
+            return GoalCheck(False, ('Generated test artifacts changed or are unavailable',))
+        requests = ws.get('tests.write.requests') or []
+        if active.get('path') == path and requests and _requested_artifacts(root, requests) != metadata['artifacts']:
+            return GoalCheck(False, ('Current test write requests differ from validated artifacts',))
+        arguments = _validation_arguments(root, current_entry, metadata.get('test_paths'), _config_from_snapshot(ws))
+        checks = (check_evidence(metadata.get('pytest_evidence'), validator=PYTEST_VALIDATOR, **arguments),
+                  check_evidence(metadata.get('coverage_evidence'), validator=COVERAGE_VALIDATOR, **arguments))
+    except (OSError, ValueError, TypeError, KeyError, GoalBlocked):
+        return GoalCheck(False, ('Current target validation inputs are unavailable or invalid',))
+    return GoalCheck(all(check.met for check in checks), tuple(reason for check in checks for reason in check.unmet))
 
 
 def _read_optional(path: Path) -> Optional[str]:
@@ -950,13 +1030,14 @@ def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
     artifacts = write_result.get("artifacts")
     if not _artifacts_match(root, artifacts) or artifacts != _artifacts(root, candidate_paths):
         raise GoalBlocked("test_artifact_changed", details={"identity": _identity(entry)})
-    expected = sorted(
-        ({"path": str(_safe_test_path(root, req["path"]).relative_to(root)),
-          "sha256": hashlib.sha256(req["content"].encode("utf-8")).hexdigest()} for req in requests),
-        key=lambda artifact: artifact["path"],
-    )
+    expected = _requested_artifacts(root, requests)
     if artifacts != expected:
         raise GoalBlocked("test_artifact_changed", details={"identity": _identity(entry)})
+    try:
+        validation_arguments = _validation_arguments(root, entry, sorted(candidate_paths), config)
+        validation_binding = capture_binding(**validation_arguments)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise GoalBlocked('validation_inputs_unavailable', details={'identity': _identity(entry), 'error': str(exc)}) from exc
     coverage_path = root / COVERAGE_PATH
     if coverage_path.exists():
         coverage_path.unlink()
@@ -1005,6 +1086,8 @@ def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
 
     if not _artifacts_match(root, artifacts):
         raise GoalBlocked("test_artifact_changed", details={"identity": _identity(entry)})
+    if not check_binding(validation_binding, **validation_arguments):
+        raise GoalBlocked('validation_inputs_changed', details={'identity': _identity(entry)})
     status = "passed" if completed.returncode == 0 else "failed"
     result = {
         "identity": _identity(entry),
@@ -1016,6 +1099,8 @@ def run_selected_tests(ws: Snapshot) -> Dict[str, Any]:
         "artifacts": artifacts,
         "coverage": coverage_data,
         "coverage_file": str(coverage_path) if coverage_path.exists() else None,
+        "evidence": bind_evidence(validation_binding, validator=PYTEST_VALIDATOR,
+                                  passed=completed.returncode == 0, details={'returncode': completed.returncode}),
     }
     store_execution_result(result)
     return {"tests.run.result": result}
@@ -1033,7 +1118,8 @@ def analyze_coverage(ws: Snapshot) -> Dict[str, Any]:
     if not coverage:
         report = {"total": 0.0, "files": {}, "target": config.coverage_target,
                   "available": False, "identity": run_result.get("identity"),
-                  "artifacts": run_result.get("artifacts")}
+                  "artifacts": run_result.get("artifacts"),
+                  "evidence": _coverage_evidence(run_result, config.coverage_target <= 0.0)}
         return {"coverage.report": report, "coverage.goal.met": config.coverage_target <= 0.0}
 
     totals = coverage.get("totals", {})
@@ -1046,6 +1132,7 @@ def analyze_coverage(ws: Snapshot) -> Dict[str, Any]:
         "target": config.coverage_target,
         "files": coverage.get("files", {}),
         "missing_lines": coverage.get("missing_lines", {}),
+        "evidence": _coverage_evidence(run_result, total_coverage >= config.coverage_target),
     }
 
     return {
@@ -1090,7 +1177,7 @@ def summarize_test_execution(ws: Snapshot) -> Dict[str, Any]:
 
 
 @step(
-    inputs=["tests.todo", "tests.progress", "tests.summary", "tests.active.entry", "tests.active.context",
+    inputs=["repo.root", "tests.todo", "tests.progress", "tests.summary", "tests.active.entry", "tests.active.context",
             "tests.run.result", "coverage.report", "testwriter.config"],
     outputs=["tests.progress", "tests.summary", "tests.completed", "tests.failed"],
 )
@@ -1106,6 +1193,17 @@ def update_progress_trackers(ws: Snapshot) -> Dict[str, Any]:
     if progress.get(path, {}).get("attempts", 0) >= entry["attempt"]:
         return {}
     config = _config_from_snapshot(ws)
+    pytest_evidence = run.get('evidence')
+    coverage_evidence = coverage.get('evidence')
+    if (not isinstance(pytest_evidence, dict) or not isinstance(coverage_evidence, dict)
+            or pytest_evidence.get('binding') != coverage_evidence.get('binding')):
+        return {}
+    try:
+        arguments = _validation_arguments(ws.get('repo.root'), entry, run.get('paths'), config)
+        if not check_binding(pytest_evidence.get('binding'), **arguments):
+            return {}
+    except (ValueError, TypeError, KeyError):
+        return {}
     coverage_met = coverage.get("total", 0) >= config.coverage_target and (
         coverage.get("available", False) or config.coverage_target <= 0)
     failures = []
@@ -1114,7 +1212,8 @@ def update_progress_trackers(ws: Snapshot) -> Dict[str, Any]:
                      "stderr": run.get("stderr", ""), "coverage": coverage}]
     progress[path] = {"identity": run["identity"], "attempts": entry["attempt"],
                       "status": run.get("status", "error"), "coverage_met": coverage_met,
-                      "coverage": coverage, "test_paths": run.get("paths", []), "artifacts": run["artifacts"], "failures": failures}
+                      "coverage": coverage, "test_paths": run.get("paths", []), "artifacts": run["artifacts"], "failures": failures,
+                      "pytest_evidence": pytest_evidence, "coverage_evidence": coverage_evidence}
     completed = sorted(path for path, meta in progress.items()
                        if meta["status"] == "passed" and meta["coverage_met"])
     failed = sorted(path for path, meta in progress.items()
@@ -1132,10 +1231,12 @@ def update_progress_trackers(ws: Snapshot) -> Dict[str, Any]:
 
 
 @step(
-    inputs=["repo.root", "tests.todo", "tests.progress", "testwriter.config", "coverage.goal.met"],
+    inputs=["repo.root", "tests.todo", "tests.progress", "tests.active.entry", "tests.write.requests", "testwriter.config", "coverage.goal.met"],
     outputs=["tests.terminal"],
 )
 def detect_terminal_state(ws: Snapshot) -> Dict[str, Any]:
+    if not _candidate_scope_check(ws):
+        return {}
     todo = ws.get("tests.todo", [])
     progress: Dict[str, Any] = ws.get("tests.progress", {})
     config = _config_from_snapshot(ws)
@@ -1145,9 +1246,7 @@ def detect_terminal_state(ws: Snapshot) -> Dict[str, Any]:
     for entry in todo:
         path = entry["path"]
         metadata = progress.get(path, {})
-        identity = metadata.get("identity") or {}
-        valid = (identity.get("target") == path and identity.get("attempt") == metadata.get("attempts")
-                 and _artifacts_match(Path(ws.get("repo.root", ".")).resolve(), metadata.get("artifacts")))
+        valid = bool(_target_evidence_check(ws, entry, metadata))
         if valid and metadata.get("status") == "passed" and metadata.get("coverage_met"):
             completed.append(path)
         elif metadata.get("attempts", 0) < config.max_attempts_per_target:
@@ -1173,8 +1272,8 @@ def detect_terminal_state(ws: Snapshot) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@goal(scope=["tests.todo", "tests.progress", "testwriter.config", "coverage.goal.met", "tests.terminal"])
-def tests_finished(ws: Snapshot) -> bool:
+@goal(scope=["repo.root", "tests.todo", "tests.progress", "testwriter.config", "coverage.goal.met", "tests.terminal"])
+def tests_finished(ws: Snapshot) -> bool | GoalCheck:
     terminal = ws.get("tests.terminal")
     if not terminal:
         return False
@@ -1183,4 +1282,14 @@ def tests_finished(ws: Snapshot) -> bool:
     if status == "failed":
         raise GoalBlocked("testwriter_failed", details={"terminal": terminal})
 
-    return status == "success"
+    if status != 'success':
+        return False
+    scope_check = _candidate_scope_check(ws)
+    if not scope_check:
+        return scope_check
+    progress = ws.get('tests.progress', {})
+    unmet = []
+    for entry in ws.get('tests.todo', []):
+        check = _target_evidence_check(ws, entry, progress.get(entry['path'], {}))
+        unmet.extend(f"{entry['path']}: {reason}" for reason in check.unmet)
+    return GoalCheck(not unmet, tuple(unmet))
