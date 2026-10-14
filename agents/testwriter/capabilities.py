@@ -900,12 +900,18 @@ def write_test_files(ws: Snapshot) -> Dict[str, Any]:
         content = req.get("content", "")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        existing = _read_optional(target_path)
-        if existing is not None and existing == content:
+        # Comparison, publication and certification share exact UTF-8 bytes;
+        # text-mode newline conversion must not change the requested artifact.
+        content_bytes = content.encode("utf-8")
+        try:
+            existing = target_path.read_bytes()
+        except FileNotFoundError:
+            existing = None
+        if existing == content_bytes:
             skipped.append(rel_path)
             continue
 
-        target_path.write_text(content, encoding="utf-8")
+        target_path.write_bytes(content_bytes)
         written.append(rel_path)
 
     result = {"written": written, "skipped": skipped, "identity": _identity(entry),

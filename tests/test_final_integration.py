@@ -297,3 +297,59 @@ def test_sdk_writer_preserves_routing_while_masking_content(tmp_path):
         assert (tmp_path / 'tests/test_generated.py').read_text() == '# [EMAIL_REDACTED]\nassert True\n'
     finally:
         clear_registry()
+
+
+@pytest.mark.parametrize('existing_newline,requested_newline', [
+    ('\r\n', '\n'),
+    ('\n', '\n'),
+    ('\r\n', '\r\n'),
+    (None, '\n'),
+    (None, '\r\n'),
+])
+def test_sdk_writer_certifies_exact_requested_utf8_bytes(tmp_path, existing_newline, requested_newline):
+    from agents.testwriter.types import TestWriterConfig as WriterConfig
+    import hashlib
+    clear_registry()
+    (tmp_path / 'pkg').mkdir()
+    (tmp_path / 'pkg/__init__.py').write_bytes(b'')
+    (tmp_path / 'pkg/mod.py').write_bytes(b'def value():\n    return 1\n')
+    (tmp_path / 'tests').mkdir()
+    target = tmp_path / 'tests/test_mod.py'
+    text = '# caf\u00e9\nfrom pkg.mod import value\n\ndef test_value():\n    assert value() == 1\n'
+    content = text.replace('\n', requested_newline)
+    if existing_newline is not None:
+        target.write_bytes(text.replace('\n', existing_newline).encode('utf-8'))
+    entry = {'path': 'pkg/mod.py', 'module': 'pkg.mod', 'attempt': 1}
+    result = Agent([tw.write_test_files, tw.run_selected_tests], trace_path=tmp_path / 'run.db').run(
+        initial={'repo.root': str(tmp_path), 'tests.active.entry': entry, 'tests.progress': {},
+                 'testwriter.config': WriterConfig().to_state(),
+                 'tests.write.requests': [{'path': 'tests/test_mod.py', 'content': content, 'identity': tw._identity(entry)}]},
+        goal=lambda s: s.exists('tests.run.result'))
+    assert result.ok, result.blocker
+    assert result.final.get('tests.run.result')['status'] == 'passed'
+    assert target.read_bytes() == content.encode('utf-8')
+    write = result.final.get('tests.write.result')
+    unchanged = existing_newline == requested_newline
+    assert write['skipped'] == (['tests/test_mod.py'] if unchanged else [])
+    assert write['written'] == ([] if unchanged else ['tests/test_mod.py'])
+    assert write['artifacts'] == [{'path': 'tests/test_mod.py', 'sha256': hashlib.sha256(content.encode('utf-8')).hexdigest()}]
+    assert result.final.get('tests.run.result')['artifacts'] == write['artifacts']
+
+
+def test_sdk_executor_still_blocks_real_byte_change(tmp_path):
+    from agents.testwriter.types import TestWriterConfig as WriterConfig
+    clear_registry()
+    entry = {'path': 'pkg/mod.py', 'module': 'pkg.mod', 'attempt': 1}
+    initial = {'repo.root': str(tmp_path), 'tests.active.entry': entry, 'tests.progress': {},
+               'testwriter.config': WriterConfig().to_state(),
+               'tests.write.requests': [{'path': 'tests/test_mod.py', 'content': 'def test_ok():\n    assert True\n', 'identity': tw._identity(entry)}]}
+    written = Agent([tw.write_test_files], trace=False).run(initial=initial, goal=lambda s: s.exists('tests.write.result'))
+    assert written.ok
+    (tmp_path / 'tests/test_mod.py').write_bytes(b'def test_changed():\n    assert True\n')
+    result = Agent([tw.run_selected_tests], trace=False).run(
+        initial={**initial, 'tests.write.result': written.final.get('tests.write.result')},
+        goal=lambda s: s.exists('tests.run.result'))
+    assert not result.ok
+    assert result.blocker.reason == 'test_artifact_changed'
+    assert not result.final.exists('tests.run.result')
+    assert not (tmp_path / tw.COVERAGE_PATH).exists()
