@@ -114,6 +114,6 @@ assert outside.read_text() == 'original'
 
 ## Completion evidence
 
-Tasks 1–3 and their scoped review fixes are committed through `5805d644fe889bacd3a03b65198f17267fcf1bfa`. Task 4 records red/green package, literal example and scaffold checks in `.superpowers/sdd/2026-10-13-ranger-reliability/task-4-report.md`. Final Task 4 verification passes 254 tests with 2 optional Graphviz skips on local Python 3.13 and fresh Python 3.11, including clean wheel/editable installs outside the checkout. CI is configured for Python 3.11–3.14; 3.12/3.14 have not been locally executed in this task.
+All four tasks and final integration corrections are committed through `dbec82196e648cb9918c0aaa23276b08fa85b5aa`. Final verification passes 291 tests with 2 optional Graphviz skips on Python 3.13 and fresh Python 3.11, including clean wheel/editable installs outside the checkout. The controller independently reran the final suite: 291 passed, 2 skipped. CI is configured for Python 3.11–3.14; hosted CI and local 3.12/3.14 execution were not performed. See the [verification receipt](../2026-10-14-ranger-verification.md) for findings, evidence and implementation decisions.
 
-- [ ] Controller independent review of the entire original-head-to-final-head change, with any findings resolved before declaring the overall repair complete.
+- [x] Controller independent review of the entire original-head-to-final-head change, with findings resolved and scoped re-reviewed. All required findings are addressed; no Critical/Important finding remains open.
