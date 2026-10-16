@@ -1,23 +1,11 @@
-"""
-Ranger Core - Topological Agent Framework
+"""Ranger's state-driven workflow runtime.
 
-A pure functional framework for building agents as directed graphs where
-execution emerges from context transitions, not imperative control flow.
+The SDK declares capabilities; the engine schedules and executes them. Workspace
+admission owns field validation, transition checks and atomic publication. State
+values and strict JSON encoding are independent of execution and persistence.
+Recorded evidence is reconstructed by data-only replay and query modules.
 
-Key principles:
-- Contexts define regions with validity predicates
-- Actions are pure functions with clear contracts  
-- Loops emerge from context transitions
-- ReAct patterns arise naturally from refinement contexts
-- Strict typing and fail-fast principles throughout
-
-Architecture:
-- core.context: Context modeling and validation
-- core.action: Action definitions and execution
-- core.engine: Scheduler and goal management
-- core.state: Immutable state management
-- core.llm: Language model adapters
-- core.observe: Logging and visualization
+See docs/ARCHITECTURE.md for dependency boundaries and extension guidance.
 """
 
 __version__ = "0.1.0"

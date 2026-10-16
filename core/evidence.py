@@ -13,17 +13,13 @@ from pathlib import Path
 import re
 
 from .errors import GoalCheck
-from .trace import dumps
-from .workspace import Snapshot
+from .serialization import dumps, fingerprint
+from .state import Snapshot
 
 
 _BINDING = 'ranger.binding@1'
 _EVIDENCE = 'ranger.evidence@1'
 _HASH = re.compile(r'[0-9a-f]{64}\Z')
-
-
-def _digest(value):
-    return hashlib.sha256(dumps(value).encode('utf-8')).hexdigest()
 
 
 def _names(values, label):
@@ -60,7 +56,7 @@ def capture_binding(state=None, *, keys=(), root=None, files=(), context=None) -
     for key in keys:
         if key not in state:
             raise KeyError(f'Missing binding input: {key}')
-        fingerprints[key] = _digest(state[key])
+        fingerprints[key] = fingerprint(state[key])
     root_path = None
     if root is not None:
         if isinstance(root, str) and not root:
@@ -92,7 +88,7 @@ def capture_binding(state=None, *, keys=(), root=None, files=(), context=None) -
     return {'schema': _BINDING, 'state': fingerprints,
             'root': str(root_path) if root_path is not None else None,
             'files': sorted(artifacts, key=lambda item: item['path']),
-            'context': _digest(context) if context is not None else None}
+            'context': fingerprint(context) if context is not None else None}
 
 
 def _is_hash(value):

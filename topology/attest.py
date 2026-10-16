@@ -31,7 +31,7 @@ def create_atom_id(content: object, schema: str | None, facets: Dict[str, object
 
 
 def _signed_payload(atom: Atom) -> str:
-    from core.trace import dumps
+    from core.serialization import dumps
     return dumps({"id": atom.id, "modality": atom.modality, "content": atom.content,
                   "schema": atom.schema, "facets": atom.facets, "policy": atom.policy,
                   "provenance": {k: v for k, v in atom.provenance.items() if k != "sig"}})

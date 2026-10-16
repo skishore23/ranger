@@ -16,7 +16,7 @@ from referencing import Registry
 from referencing.exceptions import Unresolvable
 
 from .contracts import FieldContractViolation
-from .trace import dumps
+from .serialization import dumps
 
 
 def _validator(schema):

@@ -1,0 +1,220 @@
+[
+  {
+    "run": {
+      "run_id": "fixture-0",
+      "version": 2,
+      "started_ns": 0,
+      "status": "failed",
+      "event_count": 13,
+      "domain": null
+    },
+    "events": [
+      {
+        "run_id": "fixture-0",
+        "seq": 0,
+        "kind": "initial",
+        "elapsed_ms": 0.0,
+        "payload": "{\"state\":{\"record\":{\"a\":1},\"source\":\"seed\"}}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 1,
+        "kind": "goal",
+        "elapsed_ms": 0.0,
+        "payload": "{\"missing\":[],\"name\":\"<lambda>\",\"status\":\"unmet\",\"step\":0,\"unmet\":[]}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 2,
+        "kind": "schedule",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capabilities\":[{\"attempts\":0,\"capability\":\"a.merge\",\"conflicts\":[],\"missing\":[],\"reason\":\"never_run\",\"status\":\"selected\"},{\"attempts\":0,\"capability\":\"b.noop\",\"conflicts\":[],\"missing\":[],\"reason\":\"never_run\",\"status\":\"selected\"},{\"attempts\":0,\"capability\":\"c.reject\",\"conflicts\":[{\"capability\":\"a.merge\",\"keys\":[\"record\"]}],\"missing\":[],\"reason\":\"conflict\",\"status\":\"deferred\"}],\"selected\":[\"a.merge\",\"b.noop\"],\"step\":0,\"stop\":null}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 3,
+        "kind": "capability_started",
+        "elapsed_ms": 0.0,
+        "payload": "{\"attempt\":1,\"capability\":\"a.merge\",\"checks\":[\"approval\"],\"inputs\":{\"source\":{\"provenance_id\":\"init\",\"sha256\":\"c08cd3b7bb6f677ba98206c3000015f80acf4c1082a871c002a26a56aa153212\",\"source_sha256\":\"c08cd3b7bb6f677ba98206c3000015f80acf4c1082a871c002a26a56aa153212\",\"version\":1}},\"reads\":[\"source\"],\"writes\":[\"record\"]}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 4,
+        "kind": "commit",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"a.merge\",\"state\":{\"record\":{\"a\":1,\"b\":2},\"source\":\"seed\"},\"transition\":{\"attempt\":1,\"changes\":{\"record\":{\"after\":{\"provenance_id\":\"a.merge:9b1009ae254c28c0edda2de35b6dc7aa8dcfa1e980c20383b7531379f0a66a96:32b4e9a3ccb77e088b586ddd94780fad8a06d89241f6be66471af603cb56a092\",\"value\":{\"a\":1,\"b\":2},\"version\":2},\"before\":{\"provenance_id\":\"init\",\"value\":{\"a\":1},\"version\":1},\"changed\":true}},\"checks\":[{\"met\":true,\"name\":\"approval\",\"unmet\":[]}],\"declared_writes\":[\"record\"],\"error\":null,\"id\":\"t1\",\"inputs\":{\"source\":{\"provenance_id\":\"init\",\"sha256\":\"c08cd3b7bb6f677ba98206c3000015f80acf4c1082a871c002a26a56aa153212\",\"source_sha256\":\"c08cd3b7bb6f677ba98206c3000015f80acf4c1082a871c002a26a56aa153212\",\"version\":1}},\"proposed_keys\":[\"record\"],\"schema\":\"ranger.transition@1\",\"status\":\"committed\",\"writer\":\"a.merge\"},\"writes\":{\"record\":{\"a\":1,\"b\":2}}}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 5,
+        "kind": "capability_finished",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"a.merge\",\"duration_ms\":0.0,\"status\":\"succeeded\"}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 6,
+        "kind": "capability_started",
+        "elapsed_ms": 0.0,
+        "payload": "{\"attempt\":2,\"capability\":\"b.noop\",\"checks\":[\"approval\"],\"inputs\":{},\"reads\":[],\"writes\":[]}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 7,
+        "kind": "capability_finished",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"b.noop\",\"duration_ms\":0.0,\"status\":\"succeeded\",\"transition\":{\"attempt\":2,\"changes\":{},\"checks\":[],\"declared_writes\":[],\"error\":null,\"id\":\"t2\",\"inputs\":{},\"proposed_keys\":[],\"schema\":\"ranger.transition@1\",\"status\":\"unchanged\",\"writer\":\"b.noop\"}}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 8,
+        "kind": "goal",
+        "elapsed_ms": 0.0,
+        "payload": "{\"missing\":[],\"name\":\"<lambda>\",\"status\":\"unmet\",\"step\":1,\"unmet\":[]}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 9,
+        "kind": "schedule",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capabilities\":[{\"attempts\":0,\"capability\":\"a.merge\",\"conflicts\":[],\"missing\":[],\"reason\":\"inputs_unchanged\",\"status\":\"idle\"},{\"attempts\":0,\"capability\":\"b.noop\",\"conflicts\":[],\"missing\":[],\"reason\":\"inputs_unchanged\",\"status\":\"idle\"},{\"attempts\":0,\"capability\":\"c.reject\",\"conflicts\":[],\"missing\":[],\"reason\":\"never_run\",\"status\":\"selected\"}],\"selected\":[\"c.reject\"],\"step\":1,\"stop\":null}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 10,
+        "kind": "capability_started",
+        "elapsed_ms": 0.0,
+        "payload": "{\"attempt\":3,\"capability\":\"c.reject\",\"checks\":[\"approval\"],\"inputs\":{\"record\":{\"provenance_id\":\"a.merge:9b1009ae254c28c0edda2de35b6dc7aa8dcfa1e980c20383b7531379f0a66a96:32b4e9a3ccb77e088b586ddd94780fad8a06d89241f6be66471af603cb56a092\",\"sha256\":\"43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777\",\"source_sha256\":\"43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777\",\"version\":2}},\"reads\":[\"record\"],\"writes\":[\"approved\"]}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 11,
+        "kind": "capability_finished",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"c.reject\",\"duration_ms\":0.0,\"error\":\"Transition check 'approval' rejected: ['approval denied']\",\"status\":\"failed\",\"transition\":{\"attempt\":3,\"changes\":{},\"checks\":[{\"met\":false,\"name\":\"approval\",\"unmet\":[\"approval denied\"]}],\"declared_writes\":[\"approved\"],\"error\":{\"message\":\"Transition check 'approval' rejected: ['approval denied']\",\"source\":\"transition_checks\",\"type\":\"TransitionRejected\"},\"id\":\"t3\",\"inputs\":{\"record\":{\"provenance_id\":\"a.merge:9b1009ae254c28c0edda2de35b6dc7aa8dcfa1e980c20383b7531379f0a66a96:32b4e9a3ccb77e088b586ddd94780fad8a06d89241f6be66471af603cb56a092\",\"sha256\":\"43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777\",\"source_sha256\":\"43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777\",\"version\":2}},\"proposed_keys\":[\"approved\"],\"schema\":\"ranger.transition@1\",\"status\":\"rejected\",\"writer\":\"c.reject\"}}"
+      },
+      {
+        "run_id": "fixture-0",
+        "seq": 12,
+        "kind": "outcome",
+        "elapsed_ms": 0.0,
+        "payload": "{\"error\":{\"message\":\"Transition check 'approval' rejected: ['approval denied']\",\"type\":\"TransitionRejected\"},\"state\":{\"record\":{\"a\":1,\"b\":2},\"source\":\"seed\"},\"status\":\"failed\"}"
+      }
+    ]
+  },
+  {
+    "run": {
+      "run_id": "fixture-1",
+      "version": 2,
+      "started_ns": 1,
+      "status": "failed",
+      "event_count": 6,
+      "domain": null
+    },
+    "events": [
+      {
+        "run_id": "fixture-1",
+        "seq": 0,
+        "kind": "initial",
+        "elapsed_ms": 0.0,
+        "payload": "{\"state\":{}}"
+      },
+      {
+        "run_id": "fixture-1",
+        "seq": 1,
+        "kind": "goal",
+        "elapsed_ms": 0.0,
+        "payload": "{\"missing\":[],\"name\":\"<lambda>\",\"status\":\"unmet\",\"step\":0,\"unmet\":[]}"
+      },
+      {
+        "run_id": "fixture-1",
+        "seq": 2,
+        "kind": "schedule",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capabilities\":[{\"attempts\":0,\"capability\":\"user.reject\",\"conflicts\":[],\"missing\":[],\"reason\":\"never_run\",\"status\":\"selected\"}],\"selected\":[\"user.reject\"],\"step\":0,\"stop\":null}"
+      },
+      {
+        "run_id": "fixture-1",
+        "seq": 3,
+        "kind": "capability_started",
+        "elapsed_ms": 0.0,
+        "payload": "{\"attempt\":1,\"capability\":\"user.reject\",\"checks\":[],\"inputs\":{},\"reads\":[],\"writes\":[\"approved\"]}"
+      },
+      {
+        "run_id": "fixture-1",
+        "seq": 4,
+        "kind": "capability_finished",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"user.reject\",\"duration_ms\":0.0,\"error\":\"Transition check 'custom' rejected: ['not allowed']\",\"status\":\"failed\",\"transition\":{\"attempt\":1,\"changes\":{},\"checks\":[],\"declared_writes\":[\"approved\"],\"error\":{\"message\":\"Transition check 'custom' rejected: ['not allowed']\",\"source\":\"execution\",\"type\":\"TransitionRejected\"},\"id\":\"t1\",\"inputs\":{},\"proposed_keys\":null,\"schema\":\"ranger.transition@1\",\"status\":\"rejected\",\"writer\":\"user.reject\"}}"
+      },
+      {
+        "run_id": "fixture-1",
+        "seq": 5,
+        "kind": "outcome",
+        "elapsed_ms": 0.0,
+        "payload": "{\"error\":{\"message\":\"Transition check 'custom' rejected: ['not allowed']\",\"type\":\"TransitionRejected\"},\"state\":{},\"status\":\"failed\"}"
+      }
+    ]
+  },
+  {
+    "run": {
+      "run_id": "fixture-2",
+      "version": 1,
+      "started_ns": 2,
+      "status": "succeeded",
+      "event_count": 7,
+      "domain": null
+    },
+    "events": [
+      {
+        "run_id": "fixture-2",
+        "seq": 0,
+        "kind": "initial",
+        "elapsed_ms": 0.0,
+        "payload": "{\"state\":{\"record\":{\"a\":1}}}"
+      },
+      {
+        "run_id": "fixture-2",
+        "seq": 1,
+        "kind": "goal",
+        "elapsed_ms": 0.0,
+        "payload": "{\"name\":\"done\",\"status\":\"unmet\",\"step\":0}"
+      },
+      {
+        "run_id": "fixture-2",
+        "seq": 2,
+        "kind": "capability_started",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"legacy.merge\"}"
+      },
+      {
+        "run_id": "fixture-2",
+        "seq": 3,
+        "kind": "commit",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"legacy.merge\",\"state\":{\"record\":{\"a\":1,\"b\":2}},\"writes\":{\"record\":{\"a\":1,\"b\":2}}}"
+      },
+      {
+        "run_id": "fixture-2",
+        "seq": 4,
+        "kind": "capability_finished",
+        "elapsed_ms": 0.0,
+        "payload": "{\"capability\":\"legacy.merge\",\"duration_ms\":0.0,\"status\":\"succeeded\"}"
+      },
+      {
+        "run_id": "fixture-2",
+        "seq": 5,
+        "kind": "goal",
+        "elapsed_ms": 0.0,
+        "payload": "{\"name\":\"done\",\"status\":\"met\",\"step\":1}"
+      },
+      {
+        "run_id": "fixture-2",
+        "seq": 6,
+        "kind": "outcome",
+        "elapsed_ms": 0.0,
+        "payload": "{\"blocker\":null,\"state\":{\"record\":{\"a\":1,\"b\":2}},\"status\":\"succeeded\",\"steps\":1}"
+      }
+    ]
+  }
+]

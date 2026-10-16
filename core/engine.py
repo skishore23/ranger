@@ -1,27 +1,25 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from .workspace import Workspace, Snapshot
+from .workspace import Workspace
+from .state import Snapshot
 from .trace import Recorder, recording, emit, validate, values as snapshot_values
 from .capability import Capability
 from .fields import _FieldContracts
-from .transitions import _TransitionChecks, input_refs, transition_record
+from .transition_policy import _TransitionChecks
+from .transition_records import finished_record, input_refs, transition_record
 from .errors import GoalBlocked, GoalCheck, SolveResult, WhyNot, ContractViolation
-from .provenance import digest_writes
+from .provenance import digest_reads, digest_writes
 from .execution import ExecutionState, execution_scope, current_execution, guard_atoms, guard_value, selected_snapshot_scope
 from topology import plan_path, summarize_regions, reconcile_overlaps, pack_context
 from topology.types import Budget
 
 
 def _digest_reads(cap: Capability, snap: Snapshot) -> str:
-    vals = [(k, snap.get(k, None)) for k in sorted(cap.reads or set())]
-    payload = json.dumps(vals, sort_keys=True, separators=(',', ':'), default=str)
-    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    return digest_reads({key: snap.get(key, None) for key in sorted(cap.reads)})
 
 
 class Engine:
@@ -69,8 +67,6 @@ class Engine:
 
     def _reset_run(self):
         self._last_read_digest: Dict[str, str] = {}
-        self._last_batch_blocked = False
-        self._last_blocked_cap: Optional[str] = None
         self._blocked_attempts: Dict[str, int] = {}
         self._pending: Set[str] = set()
         self._execution_recency: Dict[str, int] = {}
@@ -232,7 +228,6 @@ class Engine:
                      goal: Callable[[Snapshot], bool]) -> Snapshot:
         soft = {'llm_invalid_output', 'llm_trivial_tests', 'llm_unavailable'}
         state = current_execution()
-        self._last_batch_blocked = False
         for cap in plan:
             started = time.monotonic()
             self._attempt_sequence += 1
@@ -243,16 +238,12 @@ class Engine:
             emit('capability_started', capability=cap.id, **metadata)
             writes, committed, attempted_commit = None, False, False
 
-            def finish_metadata(status, error=None):
+            def finish_metadata(error=None):
                 if not self.trace or committed:
                     return {}
-                keys = sorted(writes) if isinstance(writes, dict) and all(isinstance(k, str) and k for k in writes) else None
-                checks = ws.last_transition_checks if attempted_commit else []
-                source = 'transition_checks' if checks and not checks[-1]['met'] else 'execution'
-                return {'transition': transition_record(
-                    cap.id, attempt, inputs, cap.writes, status=status,
-                    proposed_keys=keys, checks=checks,
-                    error=None if error is None else {'type': type(error).__name__, 'message': str(error), 'source': source})}
+                return {'transition': finished_record(
+                    cap.id, attempt, inputs, cap.writes, writes=writes,
+                    checks=ws.last_transition_checks if attempted_commit else [], error=error)}
 
             try:
                 if state is not None:
@@ -260,24 +251,8 @@ class Engine:
                 self._execution_recency[cap.id] = self._execution_sequence
                 self._execution_sequence += 1
                 rd = _digest_reads(cap, snap)
-                selected = snap
                 try:
-                    context = None
-                    if (cap.tags or set()).intersection({'action', 'llm'}):
-                        context = self._build_context(cap, snap, goal)
-                        entries = snap.data
-                        values = guard_value({k: entry.value for k, entry in entries.items()})
-                        if set(values) != set(entries):
-                            raise GoalBlocked('policy_blocked', {'error': 'guard changed workspace keys'})
-                        if self._fields is not None:
-                            self._fields.validate_values(values, cap.id)
-                        selected = Snapshot({k: replace(entry, value=values[k]) for k, entry in entries.items()})
-                    if state is not None:
-                        state.check_time()
-                    original = snap
-                    if self.strict_contracts:
-                        selected = selected.with_read_contract(cap.id, cap.reads)
-                        original = snap.with_read_contract(cap.id, cap.reads)
+                    selected, original, context = self._prepare_inputs(cap, snap, goal, state)
                     if self.trace:
                         inputs = input_refs(selected, cap.reads, source=snap)
                     with selected_snapshot_scope(original):
@@ -286,21 +261,13 @@ class Engine:
                         finally:
                             if state is not None:
                                 state.check_time()
-                        if writes is None:
-                            writes = {}
-                        if not isinstance(writes, dict):
-                            raise TypeError(f'Capability {cap.id} must return dict or None')
-                        illegal = set(writes) - cap.writes
-                        if illegal:
-                            raise ContractViolation(cap.id, 'writes', illegal)
+                        writes = self._validate_writes(cap, writes)
                         if writes and cap.post is not None:
                             if not cap.post(selected, writes):
                                 raise RuntimeError(f'verify_failed: {cap.id}')
                             # Postconditions may mutate the proposed dict; check
                             # the final proposal before publishing any values.
-                            illegal = set(writes) - cap.writes
-                            if illegal:
-                                raise ContractViolation(cap.id, 'writes', illegal)
+                            self._validate_writes(cap, writes)
                         if state is not None:
                             state.check_time()
                 except GoalBlocked as blocked:
@@ -308,11 +275,9 @@ class Engine:
                         raise
                     self._pending.add(cap.id)
                     self._blocked_attempts[cap.id] = self._blocked_attempts.get(cap.id, 0) + 1
-                    self._last_batch_blocked = True
-                    self._last_blocked_cap = cap.id
                     emit('capability_finished', capability=cap.id, status='retry',
                          duration_ms=(time.monotonic() - started) * 1000, reason=blocked.reason,
-                         **finish_metadata('rejected', blocked))
+                         **finish_metadata(blocked))
                     continue
                 if writes:
                     if self._fields is None:
@@ -322,11 +287,12 @@ class Engine:
                     prov_id = f'{cap.id}:{rd}:{digest_writes(writes)}'
                     previous = ws.snapshot() if self.trace else None
                     attempted_commit = True
-                    ws.cas_commit(writes, write_specs=cap.write_specs or {}, provenance_id=prov_id, writer=cap.id,
-                                  before_publish=state.check_time if state is not None else None)
-                    after = snapshot_values(ws.snapshot())
+                    proposed = ws.cas_commit(
+                        writes, write_specs=cap.write_specs or {}, provenance_id=prov_id, writer=cap.id,
+                        before_publish=state.check_time if state is not None else None)
+                    after = snapshot_values(proposed)
                     record = transition_record(cap.id, attempt, inputs, cap.writes, status='committed',
-                                               previous=previous, proposed=ws.snapshot(), proposed_keys=sorted(writes),
+                                               previous=previous, proposed=proposed, proposed_keys=sorted(writes),
                                                checks=ws.last_transition_checks) if self.trace else None
                     emit('commit', capability=cap.id, writes={k: after[k] for k in writes}, state=after, transition=record)
                     committed = True
@@ -337,11 +303,42 @@ class Engine:
                 emit('capability_finished', capability=cap.id,
                      status='blocked' if isinstance(exc, GoalBlocked) else 'failed',
                      duration_ms=(time.monotonic() - started) * 1000, error=str(exc),
-                     **finish_metadata('rejected', exc))
+                     **finish_metadata(exc))
                 raise
             emit('capability_finished', capability=cap.id, status='succeeded',
-                 duration_ms=(time.monotonic() - started) * 1000, **finish_metadata('unchanged'))
+                 duration_ms=(time.monotonic() - started) * 1000, **finish_metadata())
         return ws.snapshot()
+
+    def _prepare_inputs(self, cap, snap, goal, state):
+        """Build guarded runner inputs while retaining the original evidence view."""
+        selected, context = snap, None
+        if (cap.tags or set()).intersection({'action', 'llm'}):
+            context = self._build_context(cap, snap, goal)
+            entries = snap.data
+            values = guard_value({key: entry.value for key, entry in entries.items()})
+            if set(values) != set(entries):
+                raise GoalBlocked('policy_blocked', {'error': 'guard changed workspace keys'})
+            if self._fields is not None:
+                self._fields.validate_values(values, cap.id)
+            selected = Snapshot({key: replace(entry, value=values[key]) for key, entry in entries.items()})
+        if state is not None:
+            state.check_time()
+        original = snap
+        if self.strict_contracts:
+            selected = selected.with_read_contract(cap.id, cap.reads)
+            original = snap.with_read_contract(cap.id, cap.reads)
+        return selected, original, context
+
+    @staticmethod
+    def _validate_writes(cap, writes):
+        if writes is None:
+            return {}
+        if not isinstance(writes, dict):
+            raise TypeError(f'Capability {cap.id} must return dict or None')
+        illegal = set(writes) - cap.writes
+        if illegal:
+            raise ContractViolation(cap.id, 'writes', illegal)
+        return writes
 
     def _build_context(self, unit: Any, snapshot: Snapshot, goal: Callable[[Snapshot], bool]) -> List[Any]:
         goal_dict = {'name': getattr(goal, '__name__', 'unknown'),
@@ -359,6 +356,3 @@ class Engine:
         reconciled = guard_atoms(reconcile_overlaps(summaries, path, goal_dict))
         context_window = pack_context(memory_atoms + reconciled, self.budget, goal_dict)
         return guard_atoms(context_window.atoms)
-
-    def _missing_for(self, goal, snap) -> Set[str]:
-        return {k for k in getattr(goal, '__ranger_goal_scope__', set()) if not snap.exists(k)}
