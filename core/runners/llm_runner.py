@@ -129,26 +129,18 @@ class LLMRunner:
             schema=self.schema,
         )
         
-        # Parse JSON response if schema provided
         if self.schema is not None:
-            parsed_response = validate_response(response, self.schema)
-
-            # If single output field, map the entire parsed response to that field
-            write_keys = list(cap.writes)
-            if len(write_keys) == 1:
-                result = {write_keys[0]: parsed_response}
-            else:
-                # Multiple outputs - expect the JSON to have matching field names
-                result = parsed_response
+            response = validate_response(response, self.schema)
+        write_keys = list(cap.writes)
+        # A single output owns the whole response; structured multi-output maps
+        # response keys directly to the declared outputs.
+        if len(write_keys) == 1:
+            result = {write_keys[0]: response}
+        elif self.schema is not None:
+            result = response
         else:
-            # If no schema, use the first declared write field as the key
-            write_keys = list(cap.writes)
-            if len(write_keys) == 1:
-                result = {write_keys[0]: response}
-            else:
-                # Multiple writes but no schema - this is ambiguous
-                result = {"response": response}
-        
+            result = {"response": response}
+
         # Enforce write locality - capability can only update declared fields
         illegal = set(result.keys()) - cap.writes
         if illegal:

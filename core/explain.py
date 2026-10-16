@@ -1,7 +1,7 @@
 """Read-only scheduling diagnostics built exclusively from recorded evidence."""
 from __future__ import annotations
 
-from .schedule_records import validate_schedule as validate_schedule
+from .replay import validate_schedule as validate_schedule
 from .trace import replay_run
 
 

@@ -9,7 +9,40 @@ from .contracts import ContractViolation as ContractViolation, TransitionRejecte
 from .fields import _FieldContracts
 from .merge import WriteSpec, validate_value, MergeMode, merge_json_values
 from .state import Entry as Entry, FieldKey as FieldKey, Snapshot as Snapshot
-from .transition_policy import _TransitionChecks
+from .errors import GoalCheck
+
+
+def _capture_transition_checks(checks):
+    if checks is None:
+        checks = {}
+    if not isinstance(checks, MappingABC):
+        raise TypeError('transition_checks must be a mapping of names to callbacks')
+    callbacks = dict(checks)
+    if any(not isinstance(name, str) or not name.strip() or not callable(check)
+           for name, check in callbacks.items()):
+        raise ValueError('Transition checks require non-empty names and callable checks')
+    return callbacks
+
+
+def _check_transitions(checks, previous, proposed):
+    results = []
+    for name, check in checks.items():
+        try:
+            outcome = check(previous, proposed)
+            if type(outcome) is bool:
+                met, unmet = outcome, [] if outcome else [f'Transition check {name} failed']
+            elif isinstance(outcome, GoalCheck):
+                met, unmet = outcome.met, list(outcome.unmet)
+                if not met and not unmet:
+                    unmet = [f'Transition check {name} failed']
+            else:
+                met, unmet = False, ['Transition check must return bool or GoalCheck']
+        except Exception as exc:
+            met, unmet = False, [f'Transition check raised {type(exc).__name__}']
+        results.append({'name': name, 'met': met, 'unmet': unmet})
+        if not met:
+            raise TransitionRejected(name, unmet, results)
+    return results
 
 
 class Workspace:
@@ -17,7 +50,7 @@ class Workspace:
 
     def __init__(self, initial: Optional[Dict[str, Any]] = None, *, field_contracts=None, transition_checks=None):
         self._fields = _FieldContracts(field_contracts) if field_contracts is not None else None
-        self._transition_checks = _TransitionChecks(transition_checks)
+        self._transition_checks = _capture_transition_checks(transition_checks)
         self._last_transition_checks = []
         if self._fields is not None and initial is not None and not isinstance(initial, MappingABC):
             raise TypeError('Initial state must be a mapping')
@@ -60,10 +93,10 @@ class Workspace:
                 # Validators cannot retain or mutate the value to be published.
                 validate_value(spec, deepcopy(value))
             staged[key] = Entry(value, cur.version + 1 if cur else 1, provenance_id)
-        if staged and self._transition_checks.callbacks:
+        if staged and self._transition_checks:
             try:
-                self._last_transition_checks = self._transition_checks.evaluate(
-                    self.snapshot(), Snapshot({**self._store, **staged}))
+                self._last_transition_checks = _check_transitions(
+                    self._transition_checks, self.snapshot(), Snapshot({**self._store, **staged}))
             except TransitionRejected as exc:
                 self._last_transition_checks = deepcopy(exc.checks)
                 raise

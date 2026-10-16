@@ -8,12 +8,12 @@ Ranger schedules declared capabilities against state. The engine coordinates exe
 | --- | --- | --- |
 | Values | Defensive snapshots, entries and declared read views | `core.state` |
 | Encoding | Strict canonical JSON and content fingerprints | `core.serialization` |
-| Admission | Shared field schemas/writers and named transition checks | `core.fields`, `core.transition_policy` |
+| Admission | Shared field schemas/writers and named transition checks | `core.fields`, `core.workspace` |
 | Publication | Stage merged updates, run admission checks, publish atomically | `core.workspace` |
 | Execution | Scheduling, runner invocation, budgets, guards and outcomes | `core.engine`, `core.execution`, `core.runners` |
-| Record formats | Build and validate native transition and scheduling evidence | `core.transition_records`, `core.schedule_records` |
+| Record formats | Build and validate native transition evidence | `core.transition_records` |
 | Persistence | SQLite recording, context-local event emission and read-only run selection | `core.trace` |
-| Reconstruction | Event lifecycle validation and recorded state reconstruction | `core.replay` |
+| Reconstruction | Event/scheduling validation and recorded state reconstruction | `core.replay` |
 | Projections | Trajectory, field history and scheduling explanations | `core.transitions`, `core.explain` |
 | Entry points | SDK, plans, reference-agent runtime and CLI | `core.sdk`, `core.plan`, `agents.common.runtime`, `ranger.cli` |
 
@@ -34,11 +34,13 @@ Keep publication in `Workspace.cas_commit`. Adding a runner must not introduce a
 
 ## Recording and reconstruction
 
-`core.trace` reads one run and its ordered events in a read-only SQLite transaction. `core.replay.validate_run` validates the complete read independently of storage. Its event handlers enforce sequence, capability, goal, schedule and terminal-outcome rules. `TransitionReplay` separately tracks run-local field versions and the active native transition attempt.
+`core.trace` reads one run and its ordered events in a read-only SQLite transaction. `core.replay.validate_run` validates the complete read in one pass, tracking event order, the active attempt, run-local field versions and terminal requirements together. A single record decoder validates each native transition's shape and its consistency with the current fields and declared inputs.
 
-Transition construction and validation share one module and schema identifier. Runtime transition policy is separate: reconstructing history never reruns today's policy callbacks. Schedule validation similarly lives below the explanation projection. Keeping those dependencies one-way avoids import cycles and makes malformed-evidence handling independently testable.
+Transition construction and validation share one module and schema identifier. Runtime policy remains in the workspace admission path: named callbacks are held as a copied, validated mapping rather than a wrapper object. Reconstructing history never reruns policy callbacks. Schedule validation lives with replay and remains available through `core.explain.validate_schedule`.
 
 Version 1 logs retain derived legacy history. Version 2 logs retain native `ranger.transition@1` records. The refactor does not change either format, fingerprint bytes, provenance IDs, input-consumption rules or goal/scheduling semantics. Scheduling/provenance digests retain their existing support for non-JSON Python state when recording is disabled; strict evidence fingerprints use the shared canonical JSON encoder.
+
+The engine uses the retry-count map directly for retry readiness and explanations, and one attempt sequence for both transition numbering and scheduling recency. The SDK shares the provider protocol with the runner and applies default tags in one place; profile defaults are resolved by the runner when it executes.
 
 SQLite evidence is mutable local data. Structural validation cannot authenticate a consistently rewritten log. A recorder failure can leave incomplete evidence and cannot undo an already published write or an external side effect.
 

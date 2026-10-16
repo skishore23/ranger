@@ -13,7 +13,6 @@ from .transition_records import (
     validate_record as validate_record,
     validate_start as validate_start,
 )
-from .transition_policy import _TransitionChecks as _TransitionChecks
 
 
 def _native_record(version, event):

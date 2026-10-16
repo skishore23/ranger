@@ -10,42 +10,6 @@ from .serialization import dumps, fingerprint
 TRANSITION_SCHEMA = 'ranger.transition@1'
 
 
-class TransitionReplay:
-    """Run-local field versions and the currently recorded capability attempt."""
-
-    def __init__(self):
-        self._entries = {}
-        self._attempt = 0
-        self._start = None
-        self._committed = False
-
-    def initialize(self, state):
-        self._entries = {key: {'value': value, 'version': 1, 'provenance_id': 'init'}
-                         for key, value in state.items()}
-
-    def start(self, payload):
-        self._attempt += 1
-        validate_start(payload, self._entries, self._attempt)
-        self._start, self._committed = payload, False
-
-    def commit(self, payload):
-        if self._committed:
-            raise ValueError('Duplicate committed transition')
-        writes = payload.get('writes')
-        if not isinstance(writes, dict):
-            raise ValueError('Malformed transition writes')
-        self._entries = validate_record(payload.get('transition'), self._start, self._entries, 'committed', writes)
-        self._committed = True
-
-    def finish(self, payload):
-        if self._committed:
-            if payload.get('status') != 'succeeded' or 'transition' in payload:
-                raise ValueError('Contradictory transition outcome')
-        else:
-            status = 'unchanged' if payload.get('status') == 'succeeded' else 'rejected'
-            validate_record(payload.get('transition'), self._start, self._entries, status)
-
-
 def input_refs(snapshot, keys, source=None):
     actual, original = snapshot.data, (source or snapshot).data
     return {key: {'version': original[key].version, 'provenance_id': original[key].provenance_id,
@@ -110,6 +74,8 @@ def validate_start(payload, entries, attempt):
 
 def validate_record(record, start, entries, status, writes=None):
     """Validate native records without executing callbacks, tools, or models."""
+    def fail():
+        raise ValueError('Malformed transition evidence')
     required = {'schema', 'id', 'attempt', 'writer', 'status', 'inputs', 'changes',
                 'declared_writes', 'proposed_keys', 'checks', 'error'}
     if (not isinstance(record, dict) or set(record) != required
@@ -119,83 +85,63 @@ def validate_record(record, start, entries, status, writes=None):
             or record['declared_writes'] != start['writes'] or not isinstance(record['inputs'], dict)
             or set(record['inputs']) != set(start['inputs']) or not isinstance(record['changes'], dict)
             or not isinstance(record['checks'], list)):
-        _invalid_record()
-    _validate_inputs(record['inputs'], start['inputs'])
-    check_names = _validate_checks(record['checks'], start['checks'])
-    if record['proposed_keys'] is not None and not _names(record['proposed_keys']):
-        _invalid_record()
-    if status == 'committed':
-        return _committed_entries(record, start, entries, writes, check_names)
-    if record['changes']:
-        _invalid_record()
-    if status == 'unchanged':
-        if record['error'] is not None or record['checks'] or record['proposed_keys'] != []:
-            _invalid_record()
-    elif status == 'rejected':
-        _validate_rejection(record['error'], record['checks'])
-    return entries
-
-
-def _invalid_record():
-    raise ValueError('Malformed transition evidence')
-
-
-def _validate_inputs(inputs, expected):
-    for key, ref in inputs.items():
+        fail()
+    for key, ref in record['inputs'].items():
         if (not isinstance(ref, dict) or set(ref) != {'version', 'provenance_id', 'sha256', 'source_sha256'}
                 or type(ref['version']) is not int
-                or any(ref[field] != expected[key][field] for field in ('version', 'provenance_id', 'source_sha256'))
+                or any(ref[field] != start['inputs'][key][field] for field in ('version', 'provenance_id', 'source_sha256'))
                 or not isinstance(ref['sha256'], str) or re.fullmatch('[0-9a-f]{64}', ref['sha256']) is None):
-            _invalid_record()
-
-
-def _validate_checks(checks, expected):
+            fail()
     check_names = []
-    for check in checks:
+    for check in record['checks']:
         if (not isinstance(check, dict) or set(check) != {'name', 'met', 'unmet'}
                 or not isinstance(check.get('name'), str) or type(check.get('met')) is not bool
                 or not isinstance(check.get('unmet'), list)
                 or any(not isinstance(item, str) or not item for item in check['unmet'])
                 or (check['met'] and check['unmet']) or (not check['met'] and not check['unmet'])):
-            _invalid_record()
+            fail()
         check_names.append(check['name'])
     # Execution follows registration order, recorded explicitly for this attempt.
-    if check_names != expected[:len(check_names)] or len(check_names) != len(set(check_names)):
-        _invalid_record()
-    return check_names
-
-
-def _committed_entries(record, start, entries, writes, check_names):
-    if (record['error'] is not None or check_names != start['checks']
-            or any(not check['met'] for check in record['checks'])
-            or record['proposed_keys'] != sorted(writes) or not writes
-            or not set(writes) <= set(start['writes']) or set(record['changes']) != set(writes)):
-        _invalid_record()
-    updated = deepcopy(entries)
-    for key, value in writes.items():
-        change = record['changes'][key]
-        old = entries.get(key)
-        if not isinstance(change, dict) or set(change) != {'before', 'after', 'changed'}:
-            _invalid_record()
-        new = change['after']
-        if (not isinstance(new, dict) or set(new) != {'value', 'version', 'provenance_id'}
-                or type(new['version']) is not int or new['version'] != (old['version'] + 1 if old else 1)
-                or not isinstance(new['provenance_id'], str) or not new['provenance_id']
-                or dumps(new['value']) != dumps(value) or dumps(change['before']) != dumps(old)
-                or type(change['changed']) is not bool
-                or change['changed'] != (old is None or dumps(old['value']) != dumps(value))):
-            _invalid_record()
-        updated[key] = deepcopy(new)
-    return updated
-
-
-def _validate_rejection(error, checks):
-    if (not isinstance(error, dict) or set(error) != {'type', 'message', 'source'}
-            or not isinstance(error['type'], str) or not error['type'] or not isinstance(error['message'], str)
-            or error['source'] not in ('transition_checks', 'execution')
-            or any(not row['met'] for row in checks[:-1])):
-        _invalid_record()
-    failed_check = bool(checks and not checks[-1]['met'])
-    if ((error['source'] == 'transition_checks') != failed_check
-            or (failed_check and error['type'] != 'TransitionRejected')):
-        _invalid_record()
+    if check_names != start['checks'][:len(check_names)] or len(check_names) != len(set(check_names)):
+        fail()
+    if record['proposed_keys'] is not None and not _names(record['proposed_keys']):
+        fail()
+    if status == 'committed':
+        if (record['error'] is not None or check_names != start['checks']
+                or any(not check['met'] for check in record['checks'])
+                or record['proposed_keys'] != sorted(writes) or not writes
+                or not set(writes) <= set(start['writes']) or set(record['changes']) != set(writes)):
+            fail()
+        updated = deepcopy(entries)
+        for key, value in writes.items():
+            change = record['changes'][key]
+            old = entries.get(key)
+            if not isinstance(change, dict) or set(change) != {'before', 'after', 'changed'}:
+                fail()
+            new = change['after']
+            if (not isinstance(new, dict) or set(new) != {'value', 'version', 'provenance_id'}
+                    or type(new['version']) is not int or new['version'] != (old['version'] + 1 if old else 1)
+                    or not isinstance(new['provenance_id'], str) or not new['provenance_id']
+                    or dumps(new['value']) != dumps(value) or dumps(change['before']) != dumps(old)
+                    or type(change['changed']) is not bool
+                    or change['changed'] != (old is None or dumps(old['value']) != dumps(value))):
+                fail()
+            updated[key] = deepcopy(new)
+        return updated
+    if record['changes']:
+        fail()
+    if status == 'unchanged':
+        if record['error'] is not None or record['checks'] or record['proposed_keys'] != []:
+            fail()
+    elif status == 'rejected':
+        error = record['error']
+        if (not isinstance(error, dict) or set(error) != {'type', 'message', 'source'}
+                or not isinstance(error['type'], str) or not error['type'] or not isinstance(error['message'], str)
+                or error['source'] not in ('transition_checks', 'execution')
+                or any(not row['met'] for row in record['checks'][:-1])):
+            fail()
+        failed_check = bool(record['checks'] and not record['checks'][-1]['met'])
+        if ((error['source'] == 'transition_checks') != failed_check
+                or (failed_check and error['type'] != 'TransitionRejected')):
+            fail()
+    return entries

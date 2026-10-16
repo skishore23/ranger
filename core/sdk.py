@@ -11,8 +11,7 @@ This module provides the primary user-facing API for Ranger:
 
 from __future__ import annotations
 import os
-import inspect
-from typing import Any, Callable, Dict, List, Optional, Set, Union, Protocol
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 from .capability import Capability
 from .engine import Engine
 from .workspace import Snapshot
@@ -23,34 +22,8 @@ from .contracts import FieldContractViolation, TransitionRejected
 from .runners.python_runner import PythonRunner
 from .runners.llm_runner import LLMRunner
 from .runners.human_runner import HumanRunner
-from .llm.provider import RegionBackedProvider, resolve_llm_profile
+from .llm.provider import LLMProvider as LLMProvider, RegionBackedProvider, resolve_llm_profile
 from topology.types import Budget
-
-
-class LLMProvider(Protocol):
-    """Protocol for pluggable LLM providers."""
-    def generate(
-        self, 
-        *, 
-        system: Optional[str] = None,
-        prompt: str,
-        model: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        schema: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Generate text using the LLM provider."""
-        ...
-
-
-def _normalize_inputs_outputs(
-    inputs: Optional[Union[List[str], Set[str]]] = None,
-    outputs: Optional[Union[List[str], Set[str]]] = None,
-) -> tuple[Set[str], Set[str]]:
-    """Normalize inputs/outputs to sets."""
-    reads = set(inputs) if inputs is not None else set()
-    writes = set(outputs) if outputs is not None else set()
-    return reads, writes
 
 
 def _base(
@@ -80,17 +53,15 @@ def _base(
         Capability that can be used with Agent
     """
     def decorator(fn: Callable[[Snapshot], Optional[Dict[str, Any]]]) -> Capability:
-        reads, writes = _normalize_inputs_outputs(inputs, outputs)
+        reads = set(inputs) if inputs is not None else set()
+        writes = set(outputs) if outputs is not None else set()
         
         # Default runner based on purity
         actual_runner = runner or PythonRunner(fn)
         
         # Default tags based on purity
         actual_tags = set(tags) if tags else set()
-        if pure:
-            actual_tags.add("compute")
-        else:
-            actual_tags.add("action")
+        actual_tags.add("compute" if pure else "action")
         
         # Create default write specs and ensure every write key is covered
         default_write_specs: Dict[str, WriteSpec] = dict(write_specs) if write_specs else {}
@@ -136,7 +107,6 @@ def step(
         Capability that can be used with Agent
     """
     step_tags = set(tags) if tags else set()
-    step_tags.add("compute")
     
     return _base(
         inputs=inputs,
@@ -173,7 +143,6 @@ def tool(
         Capability that can be used with Agent
     """
     tool_tags = set(tags) if tags else set()
-    tool_tags.add("action")
     
     return _base(
         inputs=inputs,
@@ -230,71 +199,40 @@ def llm(
     """
     def decorator(fn: Callable) -> Capability:
         actual_provider = provider
-        profile_name: Optional[str] = None
-        provider_defaults: Dict[str, Any] = {}
-
         if profile is not None:
             if any(param is not None for param in (provider, region_key, region_budget, region_options)):
                 raise ValueError("When using profile=..., do not supply provider/region overrides")
-            profile_name = profile
-        else:
-            if actual_provider is None:
-                resolved_key = region_key or os.environ.get("RANGER_DEFAULT_LLM_REGION")
-                if not resolved_key:
-                    raise ValueError(
-                        "LLM tool requires a provider, region_key, or profile"
-                    )
-                actual_provider = RegionBackedProvider(
-                    resolved_key,
-                    budget=region_budget,
-                    default_options=region_options,
-                )
-            provider_defaults = {}
+        elif actual_provider is None:
+            resolved_key = region_key or os.environ.get("RANGER_DEFAULT_LLM_REGION")
+            if not resolved_key:
+                raise ValueError("LLM tool requires a provider, region_key, or profile")
+            actual_provider = RegionBackedProvider(
+                resolved_key, budget=region_budget, default_options=region_options)
 
-        if profile_name is None:
-            resolved_model = model or provider_defaults.get("model") or "gpt-4o-mini"
-            resolved_system = system or provider_defaults.get("system")
-            resolved_temperature = (
-                temperature if temperature is not None else provider_defaults.get("temperature")
-            )
-            resolved_max_tokens = (
-                max_tokens if max_tokens is not None else provider_defaults.get("max_tokens")
-            )
-        else:
-            resolved_model = model
-            resolved_system = system
-            resolved_temperature = temperature
-            resolved_max_tokens = max_tokens
-
-        # Parse schema if it's a string
-        parsed_schema = None
+        parsed_schema = schema
         if isinstance(schema, str):
             import json
             parsed_schema = json.loads(schema)
-        elif schema is not None:
-            parsed_schema = schema
 
         runner = LLMRunner(
             provider=actual_provider,
-            model=resolved_model,
-            system=resolved_system,
+            model=model if profile is not None else model or "gpt-4o-mini",
+            system=system if profile is not None else system or None,
             template=template,
             schema=parsed_schema,
-            temperature=resolved_temperature,
-            max_tokens=resolved_max_tokens,
+            temperature=temperature,
+            max_tokens=max_tokens,
             map_fn=map,
-            profile_name=profile_name,
-            profile_defaults=provider_defaults,
+            profile_name=profile,
         )
         
         # Use base decorator with LLM runner (LLMs are actions, not pure compute)
-        llm_tags = {"llm", "action"}
         return _base(
             inputs=inputs,
             outputs=outputs,
             pure=False,
             runner=runner,
-            tags=llm_tags,
+            tags={"llm"},
             write_specs=write_specs,
             post=post,
             name=name,
@@ -339,13 +277,12 @@ def human(
             write_keys=list(outputs or []),
         )
 
-        human_tags = {"human", "action"}
         return _base(
             inputs=inputs,
             outputs=outputs,
             pure=False,
             runner=runner,
-            tags=human_tags,
+            tags={"human"},
             write_specs=write_specs,
             name=name,
             metadata=metadata,

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 
-from .workspace import Workspace
+from .workspace import Workspace, _capture_transition_checks
 from .state import Snapshot
 from .trace import Recorder, recording, emit, validate, values as snapshot_values
 from .capability import Capability
 from .fields import _FieldContracts
-from .transition_policy import _TransitionChecks
 from .transition_records import finished_record, input_refs, transition_record
 from .errors import GoalBlocked, GoalCheck, SolveResult, WhyNot, ContractViolation
 from .provenance import digest_reads, digest_writes
@@ -34,7 +33,7 @@ class Engine:
             raise TypeError('strict_contracts must be a bool')
         self.strict_contracts = strict_contracts
         self._fields = _FieldContracts(field_contracts) if field_contracts is not None else None
-        self._transition_checks = _TransitionChecks(transition_checks)
+        self._transition_checks = _capture_transition_checks(transition_checks)
         self.capabilities = list(capabilities)
         self._prepare_capabilities()
         # Enough for multi-target reference workflows; limits remain finite.
@@ -68,9 +67,7 @@ class Engine:
     def _reset_run(self):
         self._last_read_digest: Dict[str, str] = {}
         self._blocked_attempts: Dict[str, int] = {}
-        self._pending: Set[str] = set()
         self._execution_recency: Dict[str, int] = {}
-        self._execution_sequence = 0
         self._attempt_sequence = 0
 
     def solve(self, *, initial: Dict[str, Any], goal: Callable[[Snapshot], bool | GoalCheck],
@@ -78,7 +75,7 @@ class Engine:
         self._prepare_capabilities()
         self._reset_run()
         ws = Workspace(initial, field_contracts=self._fields.export() if self._fields is not None else None,
-                       transition_checks=self._transition_checks.callbacks)
+                       transition_checks=self._transition_checks)
         state = ExecutionState(replace(self.budget))
         recorder = Recorder(self.trace_path, snapshot_values(ws.snapshot()), self.trace_domain, version=2) if self.trace else None
         try:
@@ -144,7 +141,7 @@ class Engine:
                     stop = {'reason': 'budget', 'details': blocked.details}
                     blocker = WhyNot('budget', details=blocked.details)
                 if stop is None:
-                    exhausted = next((key for key in sorted(self._pending) if self._blocked_attempts.get(key, 0) >= 3), None)
+                    exhausted = next((key for key in sorted(self._blocked_attempts) if self._blocked_attempts.get(key, 0) >= 3), None)
                     if exhausted:
                         details = {'capability': exhausted, 'attempts': self._blocked_attempts[exhausted]}
                         stop = {'reason': 'retries_exhausted', 'details': details}
@@ -169,7 +166,7 @@ class Engine:
             digest = snap.digest()
             # Evaluate the final goal and explain the final snapshot before
             # reporting a successful no-op as no progress.
-            stalled = digest in seen and not self._pending and not self._find_ready(snap)
+            stalled = digest in seen and not self._blocked_attempts and not self._find_ready(snap)
             seen.add(digest)
 
     def _schedule_report(self, snap, ready, plan, step, stop):
@@ -183,7 +180,7 @@ class Engine:
             if missing:
                 row.update(status='waiting', reason='missing_inputs')
             elif cap.id in ready_ids:
-                reason = ('retry_pending' if cap.id in self._pending else
+                reason = ('retry_pending' if cap.id in self._blocked_attempts else
                           'never_run' if cap.id not in self._last_read_digest else 'inputs_changed')
                 row.update(status='selected', reason=reason)
                 if stop is not None:
@@ -205,7 +202,7 @@ class Engine:
                 continue
             # Successful no-ops (including SkipLLM) consume this input version.
             # Missing outputs alone do not force a retry; soft failures use pending.
-            if (cap.id in self._pending
+            if (cap.id in self._blocked_attempts
                 or self._last_read_digest.get(cap.id) != _digest_reads(cap, snap)):
                 ready.append(cap)
         return ready
@@ -234,7 +231,7 @@ class Engine:
             attempt = self._attempt_sequence
             inputs = input_refs(snap, cap.reads) if self.trace else {}
             metadata = {'attempt': attempt, 'reads': sorted(cap.reads), 'writes': sorted(cap.writes),
-                        'inputs': inputs, 'checks': list(self._transition_checks.callbacks)} if self.trace else {}
+                        'inputs': inputs, 'checks': list(self._transition_checks)} if self.trace else {}
             emit('capability_started', capability=cap.id, **metadata)
             writes, committed, attempted_commit = None, False, False
 
@@ -248,8 +245,7 @@ class Engine:
             try:
                 if state is not None:
                     state.start_capability()
-                self._execution_recency[cap.id] = self._execution_sequence
-                self._execution_sequence += 1
+                self._execution_recency[cap.id] = attempt
                 rd = _digest_reads(cap, snap)
                 try:
                     selected, original, context = self._prepare_inputs(cap, snap, goal, state)
@@ -273,7 +269,6 @@ class Engine:
                 except GoalBlocked as blocked:
                     if blocked.reason not in soft:
                         raise
-                    self._pending.add(cap.id)
                     self._blocked_attempts[cap.id] = self._blocked_attempts.get(cap.id, 0) + 1
                     emit('capability_finished', capability=cap.id, status='retry',
                          duration_ms=(time.monotonic() - started) * 1000, reason=blocked.reason,
@@ -297,7 +292,6 @@ class Engine:
                     emit('commit', capability=cap.id, writes={k: after[k] for k in writes}, state=after, transition=record)
                     committed = True
                 self._last_read_digest[cap.id] = rd
-                self._pending.discard(cap.id)
                 self._blocked_attempts.pop(cap.id, None)
             except BaseException as exc:
                 emit('capability_finished', capability=cap.id,
