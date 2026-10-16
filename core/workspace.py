@@ -8,6 +8,7 @@ import hashlib
 from .merge import WriteSpec, validate_value, MergeMode, merge_json_values
 from .contracts import ContractViolation
 from .fields import _FieldContracts
+from .transitions import _TransitionChecks
 
 FieldKey = str
 
@@ -104,8 +105,10 @@ class _ContractSnapshot(Snapshot):
 
 
 class Workspace:
-    def __init__(self, initial: Optional[Dict[str, Any]] = None, *, field_contracts=None):
+    def __init__(self, initial: Optional[Dict[str, Any]] = None, *, field_contracts=None, transition_checks=None):
         self._fields = _FieldContracts(field_contracts) if field_contracts is not None else None
+        self._transition_checks = _TransitionChecks(transition_checks)
+        self._last_transition_checks = []
         if self._fields is not None and initial is not None and not isinstance(initial, MappingABC):
             raise TypeError('Initial state must be a mapping')
         values = deepcopy(initial or {})
@@ -117,11 +120,16 @@ class Workspace:
     def snapshot(self) -> Snapshot:
         return Snapshot(data=self._store)
 
+    @property
+    def last_transition_checks(self):
+        return deepcopy(self._last_transition_checks)
+
     def cas_commit(self, writes: Dict[FieldKey, Any], *,
                    write_specs: Dict[str, WriteSpec] | None = None,
                    provenance_id: str,
                    writer: str | None = None,
                    before_publish: Optional[Callable[[], None]] = None) -> Snapshot:
+        self._last_transition_checks = []
         if self._fields is not None:
             self._fields.authorize(writes, writer)
             self._fields.validate_json(writes, writer)
@@ -142,6 +150,14 @@ class Workspace:
                 # Validators cannot retain or mutate the value to be published.
                 validate_value(spec, deepcopy(value))
             staged[key] = Entry(value, cur.version + 1 if cur else 1, provenance_id)
+        if staged:
+            from .contracts import TransitionRejected
+            try:
+                self._last_transition_checks = self._transition_checks.evaluate(
+                    self.snapshot(), Snapshot({**self._store, **staged}))
+            except TransitionRejected as exc:
+                self._last_transition_checks = deepcopy(exc.checks)
+                raise
         # Validators can take arbitrary time. The engine gates publication only
         # after every value has been staged and validated; standalone callers may
         # omit the gate. A failed gate leaves all staged writes unpublished.

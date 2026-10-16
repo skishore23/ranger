@@ -19,3 +19,14 @@ class FieldContractViolation(RuntimeError):
         self.reason = reason
         self.path = tuple(path)
         super().__init__(f'Field {field!r} rejected for writer {writer!r}: {reason}; path={self.path!r}')
+
+
+class TransitionRejected(RuntimeError):
+    """A named pre-publication check declined the complete proposed state."""
+
+    def __init__(self, check, unmet, checks):
+        from copy import deepcopy
+        self.check = check
+        self.unmet = tuple(unmet)
+        self.checks = deepcopy(checks)
+        super().__init__(f'Transition check {check!r} rejected: {list(self.unmet)}')

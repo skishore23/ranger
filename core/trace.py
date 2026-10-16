@@ -79,7 +79,9 @@ def recording(recorder):
 
 
 class Recorder:
-    def __init__(self, db_path, initial, domain=None):
+    def __init__(self, db_path, initial, domain=None, *, version=1):
+        if version not in (1, 2) or type(version) is not int:
+            raise ValueError('Unsupported execution record version')
         dumps(initial)
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,8 +100,8 @@ class Recorder:
                     PRIMARY KEY (run_id, seq), FOREIGN KEY (run_id) REFERENCES execution_runs(run_id))''')
                 if 'domain' not in {r[1] for r in self.connection.execute('PRAGMA table_info(execution_runs)')}:
                     self.connection.execute('ALTER TABLE execution_runs ADD COLUMN domain TEXT')
-                self.connection.execute("INSERT INTO execution_runs (run_id,version,started_ns,status,event_count,domain) VALUES (?,1,?,'running',0,?)",
-                                        (self.run_id, time.time_ns(), domain))
+                self.connection.execute("INSERT INTO execution_runs (run_id,version,started_ns,status,event_count,domain) VALUES (?,?,?,'running',0,?)",
+                                        (self.run_id, version, time.time_ns(), domain))
             self.append('initial', {'state': initial})
         except BaseException:
             self.connection.close()
@@ -138,7 +140,7 @@ def replay_run(db_path, run_id=None) -> dict:
         events = conn.execute('SELECT * FROM execution_events WHERE run_id=? ORDER BY seq', (row['run_id'],)).fetchall()
     finally:
         conn.close()
-    if row['version'] != 1 or len(events) != row['event_count'] or not events:
+    if row['version'] not in (1, 2) or len(events) != row['event_count'] or not events:
         raise ValueError('Malformed execution run')
     state, decoded, terminal = {}, [], None
     active_capability = None
@@ -148,6 +150,8 @@ def replay_run(db_path, run_id=None) -> dict:
     previous_kind = None
     current_schedule = None
     schedule_index = 0
+    from .transitions import validate_record, validate_start
+    entries, active_start, attempt, committed = {}, None, 0, False
     allowed = {'initial', 'goal', 'schedule', 'capability_started', 'capability_finished', 'commit', 'memory_atom', 'outcome'}
     for index, event in enumerate(events):
         try:
@@ -162,11 +166,17 @@ def replay_run(db_path, run_id=None) -> dict:
             raise ValueError('Malformed execution event sequence')
         if required_outcomes is not None and kind != 'outcome':
             raise ValueError('Execution continued after a terminal capability or goal result')
+        if row['version'] == 2 and 'transition' in payload and kind not in {'commit', 'capability_finished'}:
+            raise ValueError('Transition metadata attached to an unrelated event')
         previous_elapsed = event['elapsed_ms']
         if kind == 'capability_started':
             if active_capability is not None or not isinstance(payload.get('capability'), str):
                 raise ValueError('Malformed capability start')
             active_capability = payload['capability']
+            if row['version'] == 2:
+                attempt += 1
+                validate_start(payload, entries, attempt)
+                active_start, committed = payload, False
             if current_schedule is not None:
                 selected = current_schedule['selected']
                 if schedule_index >= len(selected) or active_capability != selected[schedule_index]:
@@ -175,6 +185,21 @@ def replay_run(db_path, run_id=None) -> dict:
         if kind in {'commit', 'capability_finished'}:
             if active_capability is None or payload.get('capability') != active_capability:
                 raise ValueError('Malformed capability event order')
+            if row['version'] == 2:
+                if kind == 'commit':
+                    if committed:
+                        raise ValueError('Duplicate committed transition')
+                    writes = payload.get('writes')
+                    if not isinstance(writes, dict):
+                        raise ValueError('Malformed transition writes')
+                    entries = validate_record(payload.get('transition'), active_start, entries, 'committed', writes)
+                    committed = True
+                elif committed:
+                    if payload.get('status') != 'succeeded' or 'transition' in payload:
+                        raise ValueError('Contradictory transition outcome')
+                else:
+                    expected = 'unchanged' if payload.get('status') == 'succeeded' else 'rejected'
+                    validate_record(payload.get('transition'), active_start, entries, expected)
         if kind == 'capability_finished':
             duration = payload.get('duration_ms')
             if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
@@ -203,6 +228,8 @@ def replay_run(db_path, run_id=None) -> dict:
                 if not isinstance(writes, dict) or dumps({**state, **writes}) != dumps(snapshot):
                     raise ValueError('Inconsistent committed state')
             state = snapshot
+            if kind == 'initial':
+                entries = {key: {'value': value, 'version': 1, 'provenance_id': 'init'} for key, value in state.items()}
         if kind == 'goal':
             if current_schedule is not None and schedule_index != len(current_schedule['selected']):
                 raise ValueError('Goal checked before scheduled work completed')
@@ -254,7 +281,8 @@ def replay_run(db_path, run_id=None) -> dict:
         decoded.append({'seq': index, 'kind': kind, 'elapsed_ms': event['elapsed_ms'], 'payload': payload})
     if row['status'] != (terminal or 'running'):
         raise ValueError('Incomplete terminal evidence')
-    return {'state': state, 'run_id': row['run_id'], 'status': row['status'], 'events': decoded}
+    return {'state': state, 'run_id': row['run_id'], 'status': row['status'], 'events': decoded,
+            'record_version': row['version']}
 
 
 def diff_runs(db_path, left_id, right_id) -> dict:

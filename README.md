@@ -184,6 +184,12 @@ Trace state must use JSON `null`/`None`, booleans, integers, finite floats, stri
 
 Pass `field_contracts={"field": FieldContract(schema=..., allowed_writers=["capability-id"], allow_initial=True)}` to `Agent` to validate both initial values and final merged updates against shared JSON Schemas. A supplied map defines the complete allowed field set; writer IDs control updates, while `allow_initial` separately controls seeds. Omit the map to retain existing behavior. This complements strict read contracts and evidence binding. See the [executable example and field contract](docs/FIELD_CONTRACTS.md).
 
+## State transitions and history
+
+Pass `transition_checks={"name": callback}` to enforce rules against `(previous, proposed)` snapshots before publishing an update. The proposal includes all untouched fields and final merged writes, so a check can require that approval evidence matches the candidate being published. Return a Boolean or `GoalCheck`; failure rejects the entire update. Initial state remains a baseline and empty writes skip checks. Omit the option to preserve existing behavior.
+
+Recorded attempts now include versioned transition records: writer, declared input versions/fingerprints, accepted before/after values, check outcomes and rejected attempts. `ranger trajectory DB` displays the trajectory; `ranger history DB FIELD --json` queries accepted versions and associated rejections. Both accept `--run-id` and inspect evidence without rerunning code. Older logs remain readable with explicitly derived legacy history. See the [executable approval example and transition contract](docs/TRANSITIONS.md).
+
 ## Reusable validation evidence
 
 `core.evidence` supplies `capture_binding`, `bind_evidence`, `check_binding` and `check_evidence`. Capture declared JSON inputs/file bytes before validation, attach the actual Boolean outcome, and require a matching current binding at acceptance. Checks return `GoalCheck` with unmet requirements. Missing/malformed evidence, changed inputs, changed file inventory or context, and a different validator cannot approve a candidate. The application supplies the current dependency list independently. See the [complete example and binding contract](docs/EVIDENCE_BINDING.md).

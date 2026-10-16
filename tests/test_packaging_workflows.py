@@ -194,3 +194,32 @@ def test_installed_shared_field_example(installed):
     replay = json.loads(command([cli, 'replay', '.ranger/fields.db', '--json'], outside))
     assert replay['status'] == 'succeeded'
     assert replay['state']['validation']['passed'] is True
+
+
+def test_literal_transition_example(tmp_path):
+    document = (ROOT / 'docs/TRANSITIONS.md').read_text()
+    example = document.split('```python\n', 1)[1].split('```', 1)[0]
+    script = tmp_path / 'transitions_example.py'
+    script.write_text(example)
+    namespace = runpy.run_path(str(script), run_name='__main__')
+    assert namespace['result'].ok
+    from core.transitions import field_history, trajectory_run
+    assert [r['status'] for r in trajectory_run('.ranger/transitions.db')['transitions']] == ['committed', 'committed']
+    history = field_history('.ranger/transition_rejected.db', 'draft')
+    assert len(history['entries']) == 1 and len(history['rejections']) == 1
+
+
+def test_installed_transition_example_and_history(installed):
+    python, cli, outside, source, mode = installed
+    document = (source / 'docs/TRANSITIONS.md').read_text()
+    example = document.split('```python\n', 1)[1].split('```', 1)[0]
+    script = outside / 'transitions_example.py'
+    script.write_text(example)
+    command([python, script], outside)
+    report = json.loads(command([cli, 'trajectory', '.ranger/transitions.db', '--json'], outside))
+    assert report['record_version'] == 2 and report['status'] == 'succeeded'
+    assert [r['status'] for r in report['transitions']] == ['committed', 'committed']
+    history = json.loads(command([cli, 'history', '.ranger/transitions.db', 'approved', '--json'], outside))
+    assert [e['value'] for e in history['entries']] == [False, True]
+    rejected = json.loads(command([cli, 'history', '.ranger/transition_rejected.db', 'draft', '--json'], outside))
+    assert len(rejected['entries']) == 1 and rejected['rejections'][0]['checks'][-1]['met'] is False

@@ -10,6 +10,7 @@ from .workspace import Workspace, Snapshot
 from .trace import Recorder, recording, emit, validate, values as snapshot_values
 from .capability import Capability
 from .fields import _FieldContracts
+from .transitions import _TransitionChecks, input_refs, transition_record
 from .errors import GoalBlocked, GoalCheck, SolveResult, WhyNot, ContractViolation
 from .provenance import digest_writes
 from .execution import ExecutionState, execution_scope, current_execution, guard_atoms, guard_value, selected_snapshot_scope
@@ -27,7 +28,7 @@ class Engine:
     """Serial execution of stable batches with no declared read/write hazards."""
     def __init__(self, capabilities: List[Capability], budget: Optional[Budget] = None, *,
                  trace_path=".ranger/runs.db", trace: bool = False,
-                 strict_contracts: bool = False, field_contracts=None):
+                 strict_contracts: bool = False, field_contracts=None, transition_checks=None):
         self.trace_domain = None
         self.trace_path = trace_path
         self.trace = trace
@@ -35,6 +36,7 @@ class Engine:
             raise TypeError('strict_contracts must be a bool')
         self.strict_contracts = strict_contracts
         self._fields = _FieldContracts(field_contracts) if field_contracts is not None else None
+        self._transition_checks = _TransitionChecks(transition_checks)
         self.capabilities = list(capabilities)
         self._prepare_capabilities()
         # Enough for multi-target reference workflows; limits remain finite.
@@ -73,14 +75,16 @@ class Engine:
         self._pending: Set[str] = set()
         self._execution_recency: Dict[str, int] = {}
         self._execution_sequence = 0
+        self._attempt_sequence = 0
 
     def solve(self, *, initial: Dict[str, Any], goal: Callable[[Snapshot], bool | GoalCheck],
               max_steps: int = 60) -> SolveResult:
         self._prepare_capabilities()
         self._reset_run()
-        ws = Workspace(initial, field_contracts=self._fields.export() if self._fields is not None else None)
+        ws = Workspace(initial, field_contracts=self._fields.export() if self._fields is not None else None,
+                       transition_checks=self._transition_checks.callbacks)
         state = ExecutionState(replace(self.budget))
-        recorder = Recorder(self.trace_path, snapshot_values(ws.snapshot()), self.trace_domain) if self.trace else None
+        recorder = Recorder(self.trace_path, snapshot_values(ws.snapshot()), self.trace_domain, version=2) if self.trace else None
         try:
             with execution_scope(state), recording(recorder):
                 try:
@@ -231,7 +235,25 @@ class Engine:
         self._last_batch_blocked = False
         for cap in plan:
             started = time.monotonic()
-            emit('capability_started', capability=cap.id)
+            self._attempt_sequence += 1
+            attempt = self._attempt_sequence
+            inputs = input_refs(snap, cap.reads) if self.trace else {}
+            metadata = {'attempt': attempt, 'reads': sorted(cap.reads), 'writes': sorted(cap.writes),
+                        'inputs': inputs, 'checks': list(self._transition_checks.callbacks)} if self.trace else {}
+            emit('capability_started', capability=cap.id, **metadata)
+            writes, committed, attempted_commit = None, False, False
+
+            def finish_metadata(status, error=None):
+                if not self.trace or committed:
+                    return {}
+                keys = sorted(writes) if isinstance(writes, dict) and all(isinstance(k, str) and k for k in writes) else None
+                checks = ws.last_transition_checks if attempted_commit else []
+                source = 'transition_checks' if checks and not checks[-1]['met'] else 'execution'
+                return {'transition': transition_record(
+                    cap.id, attempt, inputs, cap.writes, status=status,
+                    proposed_keys=keys, checks=checks,
+                    error=None if error is None else {'type': type(error).__name__, 'message': str(error), 'source': source})}
+
             try:
                 if state is not None:
                     state.start_capability()
@@ -256,6 +278,8 @@ class Engine:
                     if self.strict_contracts:
                         selected = selected.with_read_contract(cap.id, cap.reads)
                         original = snap.with_read_contract(cap.id, cap.reads)
+                    if self.trace:
+                        inputs = input_refs(selected, cap.reads, source=snap)
                     with selected_snapshot_scope(original):
                         try:
                             writes = cap.runner.run(cap, selected, context=context)
@@ -287,7 +311,8 @@ class Engine:
                     self._last_batch_blocked = True
                     self._last_blocked_cap = cap.id
                     emit('capability_finished', capability=cap.id, status='retry',
-                         duration_ms=(time.monotonic() - started) * 1000, reason=blocked.reason)
+                         duration_ms=(time.monotonic() - started) * 1000, reason=blocked.reason,
+                         **finish_metadata('rejected', blocked))
                     continue
                 if writes:
                     if self._fields is None:
@@ -295,20 +320,27 @@ class Engine:
                     else:
                         self._fields.validate_json(writes, cap.id)
                     prov_id = f'{cap.id}:{rd}:{digest_writes(writes)}'
+                    previous = ws.snapshot() if self.trace else None
+                    attempted_commit = True
                     ws.cas_commit(writes, write_specs=cap.write_specs or {}, provenance_id=prov_id, writer=cap.id,
                                   before_publish=state.check_time if state is not None else None)
                     after = snapshot_values(ws.snapshot())
-                    emit('commit', capability=cap.id, writes={k: after[k] for k in writes}, state=after)
+                    record = transition_record(cap.id, attempt, inputs, cap.writes, status='committed',
+                                               previous=previous, proposed=ws.snapshot(), proposed_keys=sorted(writes),
+                                               checks=ws.last_transition_checks) if self.trace else None
+                    emit('commit', capability=cap.id, writes={k: after[k] for k in writes}, state=after, transition=record)
+                    committed = True
                 self._last_read_digest[cap.id] = rd
                 self._pending.discard(cap.id)
                 self._blocked_attempts.pop(cap.id, None)
             except BaseException as exc:
                 emit('capability_finished', capability=cap.id,
                      status='blocked' if isinstance(exc, GoalBlocked) else 'failed',
-                     duration_ms=(time.monotonic() - started) * 1000, error=str(exc))
+                     duration_ms=(time.monotonic() - started) * 1000, error=str(exc),
+                     **finish_metadata('rejected', exc))
                 raise
             emit('capability_finished', capability=cap.id, status='succeeded',
-                 duration_ms=(time.monotonic() - started) * 1000)
+                 duration_ms=(time.monotonic() - started) * 1000, **finish_metadata('unchanged'))
         return ws.snapshot()
 
     def _build_context(self, unit: Any, snapshot: Snapshot, goal: Callable[[Snapshot], bool]) -> List[Any]:

@@ -19,7 +19,7 @@ from .workspace import Snapshot
 from .merge import WriteSpec, MergeMode
 from .errors import SolveResult, GoalCheck
 from .fields import FieldContract
-from .contracts import FieldContractViolation
+from .contracts import FieldContractViolation, TransitionRejected
 from .runners.python_runner import PythonRunner
 from .runners.llm_runner import LLMRunner
 from .runners.human_runner import HumanRunner
@@ -378,7 +378,7 @@ class Agent:
     
     def __init__(self, tools: List[Capability], *, budget: Budget | None = None,
                  trace_path=".ranger/runs.db", trace: bool = True,
-                 strict_contracts: bool = False, field_contracts=None):
+                 strict_contracts: bool = False, field_contracts=None, transition_checks=None):
         """Initialize agent with tools.
         
         Args:
@@ -398,9 +398,13 @@ class Agent:
             field_contracts: Optional complete map of FieldContract definitions.
                 Enforces shared schemas and writers on initial state and updates.
                 None disables it; an empty map permits no fields.
+            transition_checks: Optional named callbacks receiving the previous and
+                complete proposed snapshots before publication. Return exact bool
+                or GoalCheck; failures raise TransitionRejected atomically.
         """
         self.engine = Engine(tools, budget=budget, trace_path=trace_path, trace=trace,
-                             strict_contracts=strict_contracts, field_contracts=field_contracts)
+                             strict_contracts=strict_contracts, field_contracts=field_contracts,
+                             transition_checks=transition_checks)
     
     def run(
         self,

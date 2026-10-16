@@ -498,6 +498,58 @@ def explain(
 
 
 @app.command()
+def trajectory(
+    db_path: Path = typer.Argument(..., exists=True, readable=True),
+    run_id: Optional[str] = typer.Option(None, '--run-id'),
+    json_output: bool = typer.Option(False, '--json'),
+) -> None:
+    """Inspect versioned transitions without executing the workflow."""
+    from core.transitions import trajectory_run
+    try:
+        report = trajectory_run(db_path, run_id)
+    except (ValueError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_output:
+        typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"Run {report['run_id']}: {report['status']}")
+    for record in report['transitions']:
+        typer.echo(f"{record['id']} {record['writer']}: {record['status']}")
+        for key, change in record['changes'].items():
+            old = change['before']['version'] if change['before'] else 'absent'
+            typer.echo(f"  {key}: {old} -> {change['after']['version']} (changed={change['changed']})")
+        for check in record['checks']:
+            typer.echo(f"  {check['name']}: {'passed' if check['met'] else 'rejected'}")
+            for reason in check['unmet']:
+                typer.echo(f'    {reason}')
+    if report['record_version'] == 1:
+        typer.echo('Legacy recording: native transition metadata was not recorded.')
+
+
+@app.command()
+def history(
+    db_path: Path = typer.Argument(..., exists=True, readable=True),
+    field: str = typer.Argument(...),
+    run_id: Optional[str] = typer.Option(None, '--run-id'),
+    json_output: bool = typer.Option(False, '--json'),
+) -> None:
+    """Inspect accepted field versions and rejected attempts."""
+    from core.transitions import field_history
+    try:
+        report = field_history(db_path, field, run_id)
+    except (ValueError, sqlite3.Error) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_output:
+        typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+    typer.echo(f"Run {report['run_id']}, field {field}")
+    for entry in report['entries']:
+        typer.echo(f"v{entry['version']} {entry['writer'] or 'initial'}: {json.dumps(entry['value'], ensure_ascii=False)}")
+    for record in report['rejections']:
+        typer.echo(f"{record['id']} {record['writer']}: rejected")
+
+
+@app.command()
 def diff(
     db_path: Path = typer.Argument(..., exists=True, readable=True),
     left: str = typer.Option(..., "--left"),

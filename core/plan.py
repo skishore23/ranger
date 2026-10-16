@@ -136,10 +136,10 @@ class Plan:
 
     def compile(self, *, budget: Budget | None = None, strict: bool = True,
                 trace_path=".ranger/runs.db", trace: bool = True,
-                strict_contracts: bool = False, field_contracts=None) -> Agent:
+                strict_contracts: bool = False, field_contracts=None, transition_checks=None) -> Agent:
         self.validate(strict=strict)
         return Agent(list(self.capabilities), budget=budget, trace_path=trace_path, trace=trace,
-                     strict_contracts=strict_contracts, field_contracts=field_contracts)
+                     strict_contracts=strict_contracts, field_contracts=field_contracts, transition_checks=transition_checks)
 
 
 def action(
